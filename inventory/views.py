@@ -5,6 +5,7 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework import serializers
 
+
 from accounts.permissions import IsAdminOrStorekeeper
 
 from .models import (
@@ -13,6 +14,7 @@ from .models import (
     MaterialCategory,
     Material,
     StockMovement,
+    EquipmentUnit,
 )
 
 from .serializers import (
@@ -21,6 +23,7 @@ from .serializers import (
     MaterialCategorySerializer,
     MaterialSerializer,
     StockMovementSerializer,
+    EquipmentUnitSerializer,
 )
 
 
@@ -83,6 +86,57 @@ class EquipmentDetailView(
     queryset = Equipment.objects.select_related("category").all()
     serializer_class = EquipmentSerializer
 
+class EquipmentUnitListCreateView(
+    BaseInventoryView,
+    generics.ListCreateAPIView
+):
+    queryset = EquipmentUnit.objects.select_related(
+        "equipment",
+        "equipment__category"
+    ).all()
+
+    serializer_class = EquipmentUnitSerializer
+
+    filter_backends = [
+        filters.SearchFilter,
+        filters.OrderingFilter,
+    ]
+
+    search_fields = [
+        "asset_number",
+        "equipment__name",
+    ]
+
+    ordering_fields = [
+        "asset_number",
+        "created_at",
+        "status",
+    ]
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+
+        status_filter = self.request.query_params.get("status")
+        equipment_id = self.request.query_params.get("equipment")
+
+        if status_filter:
+            queryset = queryset.filter(status=status_filter)
+
+        if equipment_id:
+            queryset = queryset.filter(equipment_id=equipment_id)
+
+        return queryset
+
+
+class EquipmentUnitDetailView(
+    BaseInventoryView,
+    generics.RetrieveAPIView
+):
+    queryset = EquipmentUnit.objects.select_related(
+        "equipment"
+    ).all()
+
+    serializer_class = EquipmentUnitSerializer
 
 # MATERIAL CATEGORIES
 

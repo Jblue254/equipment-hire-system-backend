@@ -5,8 +5,8 @@ from .models import (
     MaterialCategory,
     Material,
     StockMovement,
+    EquipmentUnit,
 )
-
 
 @admin.register(EquipmentCategory)
 class EquipmentCategoryAdmin(admin.ModelAdmin):
@@ -64,3 +64,20 @@ class StockMovementAdmin(admin.ModelAdmin):
     list_filter = ("movement_type", "created_at")
     search_fields = ("material__name", "reference")
     readonly_fields = ("created_at",)
+
+@admin.register(EquipmentUnit)
+class EquipmentUnitAdmin(admin.ModelAdmin):
+
+    list_display = (
+        "asset_number",
+        "equipment",
+        "status",
+        "date_acquired",
+    )
+
+    list_filter = ("status", "equipment__category")
+
+    search_fields = (
+        "asset_number",
+        "equipment__name",
+    )

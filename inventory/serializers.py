@@ -5,6 +5,7 @@ from .models import (
     MaterialCategory,
     Material,
     StockMovement,
+    EquipmentUnit,
 )
 
 
@@ -54,3 +55,28 @@ class StockMovementSerializer(serializers.ModelSerializer):
             "recorded_by",
             "created_at",
         )
+
+class EquipmentUnitSerializer(serializers.ModelSerializer):
+
+    equipment_name = serializers.CharField(
+        source="equipment.name",
+        read_only=True
+    )
+
+    class Meta:
+        model = EquipmentUnit
+        fields = "__all__"
+        read_only_fields = (
+            "id",
+            "created_at",
+            "updated_at",
+        )
+
+    def validate_equipment(self, equipment):
+        if equipment.tracking_type != "INDIVIDUAL":
+            raise serializers.ValidationError(
+                "Equipment units can only be created "
+                "for individually tracked equipment."
+            )
+
+        return equipment

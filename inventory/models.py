@@ -2,6 +2,7 @@ from django.db import models
 from django.conf import settings
 
 
+
 class EquipmentCategory(models.Model):
     name = models.CharField(max_length=100, unique=True)
     description = models.TextField(blank=True)
@@ -208,3 +209,44 @@ class StockMovement(models.Model):
 
     def __str__(self):
         return f"{self.material.name} - {self.movement_type}"
+
+class EquipmentUnit(models.Model):
+
+    class Status(models.TextChoices):
+        AVAILABLE = "AVAILABLE", "Available"
+        RESERVED = "RESERVED", "Reserved"
+        HIRED_OUT = "HIRED_OUT", "Hired Out"
+        UNDER_MAINTENANCE = "UNDER_MAINTENANCE", "Under Maintenance"
+        DAMAGED = "DAMAGED", "Damaged"
+        RETIRED = "RETIRED", "Retired"
+
+    equipment = models.ForeignKey(
+        Equipment,
+        on_delete=models.PROTECT,
+        related_name="units"
+    )
+
+    asset_number = models.CharField(
+        max_length=100,
+        unique=True
+    )
+
+    status = models.CharField(
+        max_length=30,
+        choices=Status.choices,
+        default=Status.AVAILABLE
+    )
+
+    condition_notes = models.TextField(blank=True)
+
+    date_acquired = models.DateField(
+        null=True,
+        blank=True
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"{self.equipment.name} - {self.asset_number}"

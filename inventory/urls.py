@@ -10,6 +10,8 @@ from .views import (
     MaterialListCreateView,
     MaterialDetailView,
     StockMovementListCreateView,
+    EquipmentUnitListCreateView,
+    EquipmentUnitDetailView,
 )
 
 urlpatterns = [
@@ -27,16 +29,12 @@ urlpatterns = [
     # Equipment
     path("equipment/", EquipmentListCreateView.as_view()),
     path("equipment/<int:pk>/", EquipmentDetailView.as_view()),
+    path("equipment-units/", EquipmentUnitListCreateView.as_view()),
+    path("equipment-units/<int:pk>/", EquipmentUnitDetailView.as_view()),
 
     # Material categories
-    path(
-        "material-categories/",
-        MaterialCategoryListCreateView.as_view()
-    ),
-    path(
-        "material-categories/<int:pk>/",
-        MaterialCategoryDetailView.as_view()
-    ),
+    path("material-categories/",MaterialCategoryListCreateView.as_view()),
+    path("material-categories/<int:pk>/",MaterialCategoryDetailView.as_view()),
 
     # Materials
     path("materials/", MaterialListCreateView.as_view()),
