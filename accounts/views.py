@@ -3,6 +3,10 @@ from rest_framework.response import Response
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework import status
 from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework import generics
+from .models import User
+from .serializers import CreateUserSerializer
+from .permissions import IsAdminRole
 
 from .serializers import UserSerializer
 
@@ -51,3 +55,14 @@ class ProfileView(APIView):
         return Response({
             "user": UserSerializer(request.user).data
         })
+
+class UserListCreateView(generics.ListCreateAPIView):
+    queryset = User.objects.all().order_by("-date_joined")
+    serializer_class = CreateUserSerializer
+    permission_classes = [IsAdminRole]
+
+
+class UserDetailView(generics.RetrieveUpdateDestroyAPIView):
+    queryset = User.objects.all()
+    serializer_class = UserSerializer
+    permission_classes = [IsAdminRole]
