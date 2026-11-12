@@ -251,6 +251,7 @@ class EquipmentUnit(models.Model):
     def __str__(self):
         return f"{self.equipment.name} - {self.asset_number}"
 
+
 class MaintenanceRecord(models.Model):
 
     class MaintenanceType(models.TextChoices):
@@ -279,6 +280,10 @@ class MaintenanceRecord(models.Model):
         related_name="maintenance_records"
     )
 
+    quantity_affected = models.PositiveIntegerField(default=1)
+
+    condition_cleared = models.BooleanField(default=False)
+
     maintenance_type = models.CharField(
         max_length=30,
         choices=MaintenanceType.choices
@@ -301,20 +306,11 @@ class MaintenanceRecord(models.Model):
 
     date_reported = models.DateField(auto_now_add=True)
 
-    date_started = models.DateField(
-        null=True,
-        blank=True
-    )
+    date_started = models.DateField(null=True, blank=True)
 
-    date_completed = models.DateField(
-        null=True,
-        blank=True
-    )
+    date_completed = models.DateField(null=True, blank=True)
 
-    next_service_date = models.DateField(
-        null=True,
-        blank=True
-    )
+    next_service_date = models.DateField(null=True, blank=True)
 
     status = models.CharField(
         max_length=20,
@@ -330,6 +326,41 @@ class MaintenanceRecord(models.Model):
     )
 
     created_at = models.DateTimeField(auto_now_add=True)
+
+    def clean(self):
+        from django.core.exceptions import ValidationError
+
+        if self.unit and self.unit.equipment_id != self.equipment_id:
+            raise ValidationError({
+                "unit": "Selected unit does not belong to this equipment."
+            })
+
+        if self.unit and self.quantity_affected != 1:
+            raise ValidationError({
+                "quantity_affected": "Individual units must have quantity 1."
+            })
+
+        if (
+            not self.unit
+            and self.equipment.tracking_type == "INDIVIDUAL"
+        ):
+            raise ValidationError({
+                "unit": "Select a physical unit for individually tracked equipment."
+            })
+
+        if (
+            not self.unit
+            and self.equipment.tracking_type == "QUANTITY"
+            and self.quantity_affected > self.equipment.total_quantity
+        ):
+            raise ValidationError({
+                "quantity_affected": "Maintenance quantity exceeds total equipment stock."
+            })
+
+        if self.quantity_affected < 1:
+            raise ValidationError({
+                "quantity_affected": "Quantity affected must be at least 1."
+            })
 
     def __str__(self):
         return f"{self.equipment.name} - {self.maintenance_type}"
