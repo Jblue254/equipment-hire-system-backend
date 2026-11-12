@@ -6,7 +6,9 @@ from .models import (
     Material,
     StockMovement,
     EquipmentUnit,
+    MaintenanceRecord,
 )
+
 
 @admin.register(EquipmentCategory)
 class EquipmentCategoryAdmin(admin.ModelAdmin):
@@ -80,4 +82,35 @@ class EquipmentUnitAdmin(admin.ModelAdmin):
     search_fields = (
         "asset_number",
         "equipment__name",
+    )
+    
+@admin.register(MaintenanceRecord)
+class MaintenanceRecordAdmin(admin.ModelAdmin):
+
+    list_display = (
+        "equipment",
+        "unit",
+        "maintenance_type",
+        "status",
+        "repair_cost",
+        "date_reported",
+        "date_completed",
+    )
+
+    list_filter = (
+        "maintenance_type",
+        "status",
+        "date_reported",
+    )
+
+    search_fields = (
+        "equipment__name",
+        "unit__asset_number",
+        "problem_reported",
+        "service_provider",
+    )
+
+    readonly_fields = (
+        "date_reported",
+        "created_at",
     )

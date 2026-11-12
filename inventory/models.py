@@ -250,3 +250,86 @@ class EquipmentUnit(models.Model):
 
     def __str__(self):
         return f"{self.equipment.name} - {self.asset_number}"
+
+class MaintenanceRecord(models.Model):
+
+    class MaintenanceType(models.TextChoices):
+        REPAIR = "REPAIR", "Repair"
+        ROUTINE_SERVICE = "ROUTINE_SERVICE", "Routine Service"
+        INSPECTION = "INSPECTION", "Inspection"
+        OTHER = "OTHER", "Other"
+
+    class Status(models.TextChoices):
+        REPORTED = "REPORTED", "Reported"
+        IN_PROGRESS = "IN_PROGRESS", "In Progress"
+        COMPLETED = "COMPLETED", "Completed"
+        CANCELLED = "CANCELLED", "Cancelled"
+
+    equipment = models.ForeignKey(
+        Equipment,
+        on_delete=models.PROTECT,
+        related_name="maintenance_records"
+    )
+
+    unit = models.ForeignKey(
+        EquipmentUnit,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="maintenance_records"
+    )
+
+    maintenance_type = models.CharField(
+        max_length=30,
+        choices=MaintenanceType.choices
+    )
+
+    problem_reported = models.TextField()
+
+    work_done = models.TextField(blank=True)
+
+    service_provider = models.CharField(
+        max_length=150,
+        blank=True
+    )
+
+    repair_cost = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=0
+    )
+
+    date_reported = models.DateField(auto_now_add=True)
+
+    date_started = models.DateField(
+        null=True,
+        blank=True
+    )
+
+    date_completed = models.DateField(
+        null=True,
+        blank=True
+    )
+
+    next_service_date = models.DateField(
+        null=True,
+        blank=True
+    )
+
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.REPORTED
+    )
+
+    recorded_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name="maintenance_records"
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.equipment.name} - {self.maintenance_type}"

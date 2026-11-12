@@ -12,6 +12,8 @@ from .views import (
     StockMovementListCreateView,
     EquipmentUnitListCreateView,
     EquipmentUnitDetailView,
+    MaintenanceListCreateView,
+    MaintenanceDetailView,
 )
 
 urlpatterns = [
@@ -42,4 +44,8 @@ urlpatterns = [
 
     # Stock movements
     path("stock-movements/", StockMovementListCreateView.as_view()),
+
+    # Maintenance records
+    path("maintenance/", MaintenanceListCreateView.as_view()),
+    path("maintenance/<int:pk>/", MaintenanceDetailView.as_view()),
 ]

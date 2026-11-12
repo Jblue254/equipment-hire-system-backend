@@ -4,6 +4,8 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework import serializers
+from .models import MaintenanceRecord
+from .maintenance_serializers import MaintenanceRecordSerializer
 
 
 from accounts.permissions import IsAdminOrStorekeeper
@@ -243,3 +245,31 @@ class StockMovementListCreateView(
         material.save(update_fields=["stock_quantity", "updated_at"])
 
         serializer.save(recorded_by=self.request.user)
+
+class MaintenanceListCreateView(
+    BaseInventoryView,
+    generics.ListCreateAPIView
+):
+    serializer_class = MaintenanceRecordSerializer
+
+    queryset = MaintenanceRecord.objects.select_related(
+        "equipment",
+        "unit",
+        "recorded_by"
+    ).all()
+
+    def perform_create(self, serializer):
+        serializer.save(recorded_by=self.request.user)
+
+
+class MaintenanceDetailView(
+    BaseInventoryView,
+    generics.RetrieveUpdateAPIView
+):
+    queryset = MaintenanceRecord.objects.select_related(
+        "equipment",
+        "unit",
+        "recorded_by"
+    ).all()
+
+    serializer_class = MaintenanceRecordSerializer
