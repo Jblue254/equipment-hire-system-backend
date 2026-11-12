@@ -17,6 +17,7 @@ class EquipmentCategorySerializer(serializers.ModelSerializer):
         fields = "__all__"
 
 
+
 class EquipmentSerializer(serializers.ModelSerializer):
     category_name = serializers.CharField(
         source="category.name",
@@ -46,18 +47,50 @@ class EquipmentSerializer(serializers.ModelSerializer):
             getattr(self.instance, "total_quantity", 1)
         )
 
-        if total_quantity < 1:
+        # Do not allow changing tracking methods after creation.
+        if self.instance:
+            if tracking_type != self.instance.tracking_type:
+                raise serializers.ValidationError({
+                    "tracking_type": (
+                        "You cannot change the tracking type "
+                        "after equipment has been created."
+                    )
+                })
+
+            # Quantity changes need a dedicated stock adjustment
+            # process so existing bookings and maintenance are protected.
+            if "total_quantity" in attrs:
+                raise serializers.ValidationError({
+                    "total_quantity": (
+                        "Use an equipment stock adjustment process "
+                        "to change the total quantity."
+                    )
+                })
+
+        # Individual equipment quantity is calculated from registered units.
+        if tracking_type == "INDIVIDUAL":
+            attrs["total_quantity"] = 0
+
+        elif total_quantity < 1:
             raise serializers.ValidationError({
                 "total_quantity": "Total quantity must be at least 1."
             })
 
-        if tracking_type == "INDIVIDUAL" and self.instance:
-            if tracking_type != self.instance.tracking_type:
-                raise serializers.ValidationError({
-                    "tracking_type": "You cannot change the tracking type after equipment has been created."
-                })
-
         return attrs
+
+    def create(self, validated_data):
+        tracking_type = validated_data.get("tracking_type")
+
+        if tracking_type == "INDIVIDUAL":
+            validated_data["total_quantity"] = 0
+            validated_data["available_quantity"] = 0
+
+        else:
+            quantity = validated_data.get("total_quantity", 1)
+            validated_data["available_quantity"] = quantity
+
+        return super().create(validated_data)
+
 
 
 class MaterialCategorySerializer(serializers.ModelSerializer):
