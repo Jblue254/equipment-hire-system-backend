@@ -1,3 +1,17 @@
+
 from django.contrib import admin
 
-# Register your models here.
+from .models import (
+    Booking,
+    BookingItem,
+    CreditApproval,
+    BookingReturn,
+    ReturnItem,
+)
+
+
+admin.site.register(Booking)
+admin.site.register(BookingItem)
+admin.site.register(CreditApproval)
+admin.site.register(BookingReturn)
+admin.site.register(ReturnItem)
