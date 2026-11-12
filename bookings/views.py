@@ -182,6 +182,18 @@ class BookingDecisionView(APIView):
                 status=400
             )
 
+        if booking.payment_arrangement == Booking.PaymentArrangement.CREDIT:
+
+            return Response(
+                {
+                    "error": (
+                        "Credit bookings must be reviewed through "
+                        "the Admin-only credit approval endpoint."
+                    )
+                },
+                status=400
+    )
+
         decision = request.data.get("decision")
 
         if decision == "APPROVE":
@@ -240,6 +252,7 @@ class CreditApprovalListView(
         return queryset
 
 
+
 class CreditApprovalDecisionView(APIView):
     permission_classes = [
         IsAuthenticated,
@@ -258,9 +271,17 @@ class CreditApprovalDecisionView(APIView):
 
         if approval.status != CreditApproval.Status.PENDING:
             return Response(
-                {
-                    "error": "This credit request has already been reviewed."
-                },
+                {"error": "This credit request has already been reviewed."},
+                status=400
+            )
+
+        booking = Booking.objects.select_for_update().get(
+            pk=approval.booking_id
+        )
+
+        if booking.payment_arrangement != Booking.PaymentArrangement.CREDIT:
+            return Response(
+                {"error": "This booking is not a credit booking."},
                 status=400
             )
 
@@ -269,11 +290,25 @@ class CreditApprovalDecisionView(APIView):
 
         if decision not in ["APPROVED", "REJECTED"]:
             return Response(
-                {
-                    "error": "Decision must be APPROVED or REJECTED."
-                },
+                {"error": "Decision must be APPROVED or REJECTED."},
                 status=400
             )
+
+        if decision == "APPROVED":
+            try:
+                reserve_booking_equipment(booking)
+
+            except serializers.ValidationError as error:
+                transaction.set_rollback(True)
+                return Response(
+                    {"error": error.detail},
+                    status=400
+                )
+
+            booking.status = Booking.Status.APPROVED
+
+        else:
+            booking.status = Booking.Status.REJECTED
 
         approval.status = decision
         approval.reviewed_by = request.user
@@ -286,14 +321,6 @@ class CreditApprovalDecisionView(APIView):
             "reviewed_at",
             "review_notes",
         ])
-
-        booking = approval.booking
-
-        if decision == "APPROVED":
-            booking.status = Booking.Status.APPROVED
-
-        else:
-            booking.status = Booking.Status.REJECTED
 
         booking.save(update_fields=[
             "status",
