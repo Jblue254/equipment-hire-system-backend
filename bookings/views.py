@@ -7,6 +7,8 @@ from rest_framework import generics, serializers
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
+from inventory.models import Equipment, EquipmentUnit
+from inventory.views import sync_equipment_summary
 
 from accounts.permissions import IsAdminRole, IsAdminOrStorekeeper
 
@@ -20,6 +22,76 @@ from .serializers import (
     CreditApprovalSerializer,
 )
 
+def reserve_booking_equipment(booking):
+    """
+    Reserve all equipment requested in a booking.
+    Must be called inside transaction.atomic().
+    """
+
+    items = booking.items.select_related(
+        "equipment",
+        "equipment_unit"
+    ).all()
+
+    reserved_units = set()
+
+    for item in items:
+
+        equipment = Equipment.objects.select_for_update().get(
+            pk=item.equipment_id
+        )
+
+        if not equipment.is_active:
+            raise serializers.ValidationError(
+                f"{equipment.name} is inactive."
+            )
+
+        if equipment.tracking_type == "INDIVIDUAL":
+
+            unit = EquipmentUnit.objects.select_for_update().get(
+                pk=item.equipment_unit_id
+            )
+
+            if unit.equipment_id != equipment.id:
+                raise serializers.ValidationError(
+                    "The selected unit does not belong to this equipment."
+                )
+
+            if unit.status != EquipmentUnit.Status.AVAILABLE:
+                raise serializers.ValidationError(
+                    f"Unit {unit.asset_number} is no longer available."
+                )
+
+            if unit.pk in reserved_units:
+                raise serializers.ValidationError(
+                    f"Unit {unit.asset_number} appears more than once."
+                )
+
+            unit.status = EquipmentUnit.Status.RESERVED
+            unit.save(update_fields=["status", "updated_at"])
+
+            reserved_units.add(unit.pk)
+
+            sync_equipment_summary(equipment)
+
+        else:
+
+            if item.equipment_unit_id:
+                raise serializers.ValidationError(
+                    "Quantity-based equipment cannot use individual units."
+                )
+
+            if item.quantity > equipment.available_quantity:
+                raise serializers.ValidationError(
+                    f"Only {equipment.available_quantity} units of "
+                    f"{equipment.name} remain available."
+                )
+
+            equipment.available_quantity -= item.quantity
+
+            equipment.save(update_fields=["available_quantity"])
+
+            sync_equipment_summary(equipment)
 
 class BaseBookingView:
     permission_classes = [
@@ -77,6 +149,8 @@ class BookingDetailView(
     BaseBookingView,
     generics.RetrieveAPIView
 ):
+
+    
     queryset = Booking.objects.prefetch_related(
         "items",
         "items__equipment",
@@ -87,6 +161,59 @@ class BookingDetailView(
     ).all()
 
     serializer_class = BookingSerializer
+
+class BookingDecisionView(APIView):
+    permission_classes = [
+        IsAuthenticated,
+        IsAdminOrStorekeeper,
+    ]
+
+    @transaction.atomic
+    def post(self, request, pk):
+
+        booking = get_object_or_404(
+            Booking.objects.select_for_update(),
+            pk=pk
+        )
+
+        if booking.status != Booking.Status.PENDING:
+            return Response(
+                {"error": "This booking has already been reviewed."},
+                status=400
+            )
+
+        decision = request.data.get("decision")
+
+        if decision == "APPROVE":
+
+            try:
+                reserve_booking_equipment(booking)
+
+            except serializers.ValidationError as error:
+                return Response(
+                    {"error": error.detail},
+                    status=400
+                )
+
+            booking.status = Booking.Status.APPROVED
+
+        elif decision == "REJECT":
+
+            booking.status = Booking.Status.REJECTED
+
+        else:
+            return Response(
+                {"error": "Decision must be APPROVE or REJECT."},
+                status=400
+            )
+
+        booking.save(update_fields=["status", "updated_at"])
+
+        return Response({
+            "message": f"Booking {decision.lower()}d successfully.",
+            "booking_number": booking.booking_number,
+            "status": booking.status
+        })
 
 
 # CREDIT REQUESTS

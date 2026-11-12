@@ -6,6 +6,7 @@ from .views import (
     BookingDetailView,
     CreditApprovalListView,
     CreditApprovalDecisionView,
+    BookingDecisionView,
 )
 
 
@@ -33,4 +34,6 @@ urlpatterns = [
         CreditApprovalDecisionView.as_view(),
         name="credit-approval-decision"
     ),
+
+    path("<int:pk>/decision/",BookingDecisionView.as_view(),name="booking-decision"),
 ]
