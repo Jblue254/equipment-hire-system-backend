@@ -15,8 +15,8 @@ from .models import (
 )
 
 
-class BookingItemSerializer(serializers.ModelSerializer):
 
+class BookingItemSerializer(serializers.ModelSerializer):
     equipment_name = serializers.CharField(
         source="equipment.name",
         read_only=True
@@ -28,16 +28,9 @@ class BookingItemSerializer(serializers.ModelSerializer):
         allow_null=True
     )
 
-    line_total = serializers.DecimalField(
-        max_digits=12,
-        decimal_places=2,
-        read_only=True
-    )
-
     class Meta:
         model = BookingItem
-
-        fields = (
+        fields = [
             "id",
             "equipment",
             "equipment_name",
@@ -48,54 +41,92 @@ class BookingItemSerializer(serializers.ModelSerializer):
             "hire_rate",
             "duration_units",
             "line_total",
-        )
-
-        read_only_fields = ("id", "line_total")
+        ]
+        read_only_fields = [
+            "id",
+            "hire_rate",
+            "line_total",
+        ]
 
     def validate(self, attrs):
         equipment = attrs.get("equipment")
-        unit = attrs.get("equipment_unit")
+        equipment_unit = attrs.get("equipment_unit")
         quantity = attrs.get("quantity", 1)
+        rate_period = attrs.get("rate_period")
+        duration_units = attrs.get("duration_units", 1)
 
-        if not equipment:
-            raise serializers.ValidationError({
-                "equipment": "Select equipment."
-            })
+        if quantity < 1:
+            raise serializers.ValidationError(
+                {"quantity": "Quantity must be at least 1."}
+            )
 
+        if duration_units < 1:
+            raise serializers.ValidationError(
+                {"duration_units": "Duration must be at least 1."}
+            )
+
+        # Validate equipment tracking type
         if equipment.tracking_type == "INDIVIDUAL":
-
-            if not unit:
+            if not equipment_unit:
                 raise serializers.ValidationError({
-                    "equipment_unit": (
-                        "Select the specific equipment unit."
-                    )
+                    "equipment_unit": "Select an individual equipment unit."
                 })
 
-            if unit.equipment_id != equipment.id:
+            if equipment_unit.equipment_id != equipment.id:
                 raise serializers.ValidationError({
-                    "equipment_unit": (
-                        "This unit does not belong to the selected equipment."
-                    )
+                    "equipment_unit": "This unit does not belong to the selected equipment."
                 })
 
             if quantity != 1:
                 raise serializers.ValidationError({
-                    "quantity": (
-                        "Individual equipment must have a quantity of 1."
-                    )
+                    "quantity": "Individual equipment quantity must be 1."
                 })
 
         elif equipment.tracking_type == "QUANTITY":
-
-            if unit:
+            if equipment_unit:
                 raise serializers.ValidationError({
-                    "equipment_unit": (
-                        "Do not select an individual unit for quantity-based equipment."
+                    "equipment_unit": "Quantity-based equipment cannot use an individual unit."
+                })
+            
+            if not equipment.is_active:
+
+                raise serializers.ValidationError({
+                    "equipment": "This equipment is inactive."
+                })
+            
+
+            if quantity > equipment.available_quantity:
+                raise serializers.ValidationError({
+                    "quantity": (
+                        f"Only {equipment.available_quantity} units "
+                        "are currently available."
                     )
                 })
+            
+            # Calculate hire rate from the equipment record
+            rate_field = f"{rate_period.lower()}_rate"
+            actual_rate = getattr(equipment, rate_field, None)
 
-        return attrs
+            if actual_rate is None or actual_rate <= 0:
+                            raise serializers.ValidationError({
+                                "rate_period": "The selected hire rate is not configured for this equipment."
+                            })
+            
+            # Never trust a price submitted by the frontend
+            attrs["hire_rate"] = actual_rate
 
+            return attrs
+        if equipment_unit.status != "AVAILABLE":
+
+            raise serializers.ValidationError({
+                "equipment_unit": "This equipment unit is not currently available."
+            })
+        
+
+        if not equipment.is_active:
+            raise serializers.ValidationError({
+                "equipment": "This equipment is inactive."
+            })
 
 class BookingSerializer(serializers.ModelSerializer):
 
