@@ -41,28 +41,30 @@ class BaseInventoryView:
     ]
 
 
-def sync_individual_equipment(equipment):
+
+def sync_equipment_summary(equipment):
     """
-    Recalculate parent equipment quantities and summary status
-    from its registered physical units.
+    Synchronize the parent equipment record.
+    Individual equipment uses physical unit statuses.
+    Quantity-based equipment uses its available quantity.
     """
 
-    units = EquipmentUnit.objects.filter(
-        equipment=equipment
-    )
+    if equipment.tracking_type == "INDIVIDUAL":
 
-    total = units.count()
+        units = EquipmentUnit.objects.filter(
+            equipment=equipment
+        )
 
-    available = units.filter(
-        status=EquipmentUnit.Status.AVAILABLE
-    ).count()
+        equipment.total_quantity = units.count()
 
-    equipment.total_quantity = total
-    equipment.available_quantity = available
+        equipment.available_quantity = units.filter(
+            status=EquipmentUnit.Status.AVAILABLE
+        ).count()
 
-    if total > 0:
+        if equipment.total_quantity == 0:
+            equipment.status = Equipment.Status.AVAILABLE
 
-        if available > 0:
+        elif equipment.available_quantity > 0:
             equipment.status = Equipment.Status.AVAILABLE
 
         elif units.filter(
@@ -87,6 +89,30 @@ def sync_individual_equipment(equipment):
 
         else:
             equipment.status = Equipment.Status.RETIRED
+
+    else:
+        if equipment.available_quantity > 0:
+            equipment.status = Equipment.Status.AVAILABLE
+
+        else:
+            from django.db.models import Sum
+
+            maintenance_quantity = (
+                MaintenanceRecord.objects.filter(
+                    equipment=equipment,
+                    condition_cleared=False,
+                    status__in=[
+                        MaintenanceRecord.Status.REPORTED,
+                        MaintenanceRecord.Status.IN_PROGRESS,
+                        MaintenanceRecord.Status.COMPLETED,
+                    ]
+                ).aggregate(
+                    total=Sum("quantity_affected")
+                )["total"] or 0
+            )
+
+            if maintenance_quantity >= equipment.total_quantity:
+                equipment.status = Equipment.Status.UNDER_MAINTENANCE
 
     equipment.save(update_fields=[
         "total_quantity",
@@ -209,7 +235,7 @@ class EquipmentUnitListCreateView(
         serializer.save(equipment=equipment)
 
         # Recalculate quantities from the actual units.
-        sync_individual_equipment(equipment)
+        sync_equipment_summary(equipment)
 
 
 class EquipmentUnitDetailView(
@@ -399,13 +425,12 @@ class MaintenanceListCreateView(
             "available_quantity",
             "updated_at",
         ])
-
         serializer.save(
             equipment=equipment,
             recorded_by=self.request.user,
             condition_cleared=False,
         )
-
+        sync_equipment_summary(equipment)
 
 class MaintenanceDetailView(
     BaseInventoryView,
@@ -421,6 +446,7 @@ class MaintenanceDetailView(
 
     @transaction.atomic
     def perform_update(self, serializer):
+
         record = MaintenanceRecord.objects.select_for_update().get(
             pk=self.get_object().pk
         )
@@ -429,15 +455,22 @@ class MaintenanceDetailView(
             pk=record.equipment_id
         )
 
-        # Equipment, unit and affected quantity cannot be changed
-        # after a maintenance record has been created.
+        # Prevent editing equipment allocation details.
         for field in ("equipment", "unit", "quantity_affected"):
             if field in serializer.validated_data:
                 raise serializers.ValidationError({
                     field: "This field cannot be changed after maintenance is recorded."
                 })
 
-        old_condition_cleared = record.condition_cleared
+        # Prevent reopening a maintenance record after equipment
+        # has already been cleared and released.
+        if record.condition_cleared:
+            raise serializers.ValidationError({
+                "status": (
+                    "This maintenance record has already been cleared. "
+                    "Create a new maintenance record if further repairs are needed."
+                )
+            })
 
         updated_record = serializer.save(
             equipment=equipment,
@@ -446,43 +479,50 @@ class MaintenanceDetailView(
             recorded_by=record.recorded_by,
         )
 
-        # Release equipment only when maintenance is completed or
-        # cancelled AND its condition has been explicitly cleared.
+        # Release equipment only when both conditions are satisfied.
         can_release = (
-            updated_record.status in (
+            updated_record.status in [
                 MaintenanceRecord.Status.COMPLETED,
                 MaintenanceRecord.Status.CANCELLED,
-            )
+            ]
             and updated_record.condition_cleared
-            and not old_condition_cleared
         )
 
         if can_release:
 
             if equipment.tracking_type == "INDIVIDUAL":
+
                 unit = EquipmentUnit.objects.select_for_update().get(
                     pk=record.unit_id
                 )
 
+                if unit.status != EquipmentUnit.Status.UNDER_MAINTENANCE:
+                    raise serializers.ValidationError({
+                        "unit": "This unit is not currently under maintenance."
+                    })
+
                 unit.status = EquipmentUnit.Status.AVAILABLE
-                unit.save(update_fields=["status", "updated_at"])
 
-                equipment.available_quantity = (
-                    EquipmentUnit.objects.filter(
-                        equipment=equipment,
-                        status=EquipmentUnit.Status.AVAILABLE
-                    ).count()
-                )
+                unit.save(update_fields=[
+                    "status",
+                    "updated_at",
+                ])
 
+                sync_equipment_summary(equipment)
             else:
+
                 equipment.available_quantity += record.quantity_affected
 
                 if equipment.available_quantity > equipment.total_quantity:
                     raise serializers.ValidationError({
-                        "condition_cleared": "Cannot release more equipment than the total quantity."
+                        "condition_cleared": (
+                            "Cannot release more equipment than "
+                            "the registered total quantity."
+                        )
                     })
 
-            equipment.save(update_fields=[
-                "available_quantity",
-                "updated_at",
-            ])
+                equipment.save(update_fields=[
+                    "available_quantity",
+                    "updated_at",
+                ])
+                sync_equipment_summary(equipment)

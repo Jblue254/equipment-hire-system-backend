@@ -87,5 +87,26 @@ class MaintenanceRecordSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError({
                     "quantity_affected": "Maintenance quantity cannot exceed total equipment quantity."
                 })
+            status_value = attrs.get(
+            "status",
+            getattr(self.instance, "status", None)
+        )
+
+        condition_cleared = attrs.get(
+            "condition_cleared",
+            getattr(self.instance, "condition_cleared", False)
+        )
+
+        if condition_cleared and status_value not in (
+            MaintenanceRecord.Status.COMPLETED,
+            MaintenanceRecord.Status.CANCELLED,
+        ):
+            raise serializers.ValidationError({
+                "condition_cleared": (
+                    "Maintenance must be completed or cancelled "
+                    "before equipment can be cleared."
+                )
+            })
+            
 
         return attrs
