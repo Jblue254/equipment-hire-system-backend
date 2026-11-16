@@ -50,6 +50,7 @@ INSTALLED_APPS = [
     "finance",
     "sales",
     "transport",
+    "notifications",
 ]
 
 MIDDLEWARE = [
