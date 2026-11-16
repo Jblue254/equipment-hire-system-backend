@@ -1,4 +1,3 @@
-
 from django.db import models
 from django.conf import settings
 from django.core.validators import MinValueValidator
@@ -257,3 +256,28 @@ class ReturnItem(models.Model):
 
     def __str__(self):
         return f"{self.booking_item.equipment.name} - {self.condition}"
+
+
+class DispatchRecord(models.Model):
+    booking = models.OneToOneField(
+        Booking,
+        on_delete=models.PROTECT,
+        related_name="dispatch_record"
+    )
+
+    dispatched_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="equipment_dispatches"
+    )
+
+    dispatched_at = models.DateTimeField(
+        auto_now_add=True
+    )
+
+    notes = models.TextField(
+        blank=True
+    )
+
+    def __str__(self):
+        return f"Dispatch - {self.booking.booking_number}"

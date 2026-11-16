@@ -1,15 +1,17 @@
 
 from django.contrib import admin
 
+
 from .models import (
     Booking,
     BookingItem,
     CreditApproval,
     BookingReturn,
     ReturnItem,
+    DispatchRecord
 )
 
-
+admin.site.register(DispatchRecord)
 admin.site.register(Booking)
 admin.site.register(BookingItem)
 admin.site.register(CreditApproval)
