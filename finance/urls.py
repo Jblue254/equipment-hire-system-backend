@@ -4,6 +4,7 @@ from .views import (
     PaymentListCreateView,
     PaymentVerificationView,
     BookingPaymentBalanceView,
+    SalePaymentBalanceView,
 )
 
 
@@ -24,4 +25,9 @@ urlpatterns = [
     BookingPaymentBalanceView.as_view(),
     name="booking-payment-balance"
     ),
+    path(
+    "sales/<int:sale_id>/balance/",
+    SalePaymentBalanceView.as_view(),
+    name="sale-payment-balance"
+),
 ]

@@ -5,9 +5,17 @@ from .models import Payment
 
 
 class PaymentSerializer(serializers.ModelSerializer):
+
     booking_number = serializers.CharField(
         source="booking.booking_number",
-        read_only=True
+        read_only=True,
+        allow_null=True
+    )
+
+    sale_number = serializers.CharField(
+        source="sale.sale_number",
+        read_only=True,
+        allow_null=True
     )
 
     recorded_by_name = serializers.CharField(
@@ -23,10 +31,13 @@ class PaymentSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Payment
+
         fields = [
             "id",
             "booking",
             "booking_number",
+            "sale",
+            "sale_number",
             "amount",
             "payment_method",
             "status",
@@ -65,7 +76,24 @@ class PaymentSerializer(serializers.ModelSerializer):
         return value
 
     def validate(self, attrs):
-        booking = attrs.get("booking")
+
+        booking = attrs.get(
+            "booking",
+            getattr(self.instance, "booking", None)
+        )
+
+        sale = attrs.get(
+            "sale",
+            getattr(self.instance, "sale", None)
+        )
+
+        # Exactly one transaction must be selected.
+        if bool(booking) == bool(sale):
+            raise serializers.ValidationError({
+                "transaction": (
+                    "Select exactly one booking or sale."
+                )
+            })
 
         if booking:
             if booking.status in [
@@ -74,7 +102,20 @@ class PaymentSerializer(serializers.ModelSerializer):
                 "COMPLETED",
             ]:
                 raise serializers.ValidationError({
-                    "booking": "Payments cannot be recorded for this booking."
+                    "booking": (
+                        "Payments cannot be recorded for this booking."
+                    )
+                })
+
+        if sale:
+            if sale.status in [
+                "CANCELLED",
+                "COMPLETED",
+            ]:
+                raise serializers.ValidationError({
+                    "sale": (
+                        "Payments cannot be recorded for this sale."
+                    )
                 })
 
         return attrs

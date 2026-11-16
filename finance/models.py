@@ -2,6 +2,7 @@
 from django.conf import settings
 from django.core.validators import MinValueValidator
 from django.db import models
+from django.db.models import Q
 
 
 class Payment(models.Model):
@@ -20,7 +21,17 @@ class Payment(models.Model):
     booking = models.ForeignKey(
         "bookings.Booking",
         on_delete=models.PROTECT,
-        related_name="payments"
+        related_name="payments",
+        null=True,
+        blank=True
+    )
+
+    sale = models.ForeignKey(
+        "sales.Sale",
+        on_delete=models.PROTECT,
+        related_name="payments",
+        null=True,
+        blank=True
     )
 
     amount = models.DecimalField(
@@ -79,23 +90,33 @@ class Payment(models.Model):
         blank=True
     )
 
-    notes = models.TextField(
-        blank=True
-    )
+    notes = models.TextField(blank=True)
 
-    created_at = models.DateTimeField(
-        auto_now_add=True
-    )
+    created_at = models.DateTimeField(auto_now_add=True)
 
-    updated_at = models.DateTimeField(
-        auto_now=True
-    )
+    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         ordering = ["-created_at"]
 
+        constraints = [
+            models.CheckConstraint(
+                condition=(
+                    Q(booking__isnull=False, sale__isnull=True)
+                    | Q(booking__isnull=True, sale__isnull=False)
+                ),
+                name="payment_exactly_one_booking_or_sale"
+            )
+        ]
+
     def __str__(self):
+        reference = (
+            self.booking.booking_number
+            if self.booking_id
+            else self.sale.sale_number
+        )
+
         return (
-            f"{self.booking.booking_number} - "
-            f"{self.amount} - {self.payment_method}"
+            f"{reference} - {self.amount} - "
+            f"{self.payment_method}"
         )

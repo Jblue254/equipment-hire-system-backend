@@ -12,9 +12,11 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from accounts.permissions import IsAdminOrStorekeeper
+from bookings.models import Booking, CreditApproval
+from sales.models import Sale
+
 from .models import Payment
 from .serializers import PaymentSerializer
-from bookings.models import Booking, CreditApproval
 
 
 class BaseFinanceView:
@@ -22,6 +24,22 @@ class BaseFinanceView:
         IsAuthenticated,
         IsAdminOrStorekeeper,
     ]
+
+
+def get_payment_totals(transaction_object, transaction_field):
+    payments = Payment.objects.filter(
+        **{transaction_field: transaction_object}
+    )
+
+    confirmed = payments.filter(
+        status=Payment.PaymentStatus.CONFIRMED
+    ).aggregate(total=Sum("amount"))["total"] or Decimal("0.00")
+
+    pending = payments.filter(
+        status=Payment.PaymentStatus.PENDING
+    ).aggregate(total=Sum("amount"))["total"] or Decimal("0.00")
+
+    return confirmed, pending
 
 
 class PaymentListCreateView(
@@ -32,6 +50,7 @@ class PaymentListCreateView(
 
     queryset = Payment.objects.select_related(
         "booking",
+        "sale",
         "recorded_by",
         "verified_by",
     ).all()
@@ -40,11 +59,15 @@ class PaymentListCreateView(
         queryset = super().get_queryset()
 
         booking_id = self.request.query_params.get("booking")
+        sale_id = self.request.query_params.get("sale")
         payment_status = self.request.query_params.get("status")
         payment_method = self.request.query_params.get("payment_method")
 
         if booking_id:
             queryset = queryset.filter(booking_id=booking_id)
+
+        if sale_id:
+            queryset = queryset.filter(sale_id=sale_id)
 
         if payment_status:
             queryset = queryset.filter(status=payment_status)
@@ -57,62 +80,97 @@ class PaymentListCreateView(
     @transaction.atomic
     def perform_create(self, serializer):
 
-        booking_id = serializer.validated_data["booking"].pk
-
-        booking = get_object_or_404(
-            Booking.objects.select_for_update(),
-            pk=booking_id
-        )
-
+        booking = serializer.validated_data.get("booking")
+        sale = serializer.validated_data.get("sale")
         amount = serializer.validated_data["amount"]
 
-        if booking.status in [
-            Booking.Status.REJECTED,
-            Booking.Status.CANCELLED,
-            Booking.Status.COMPLETED,
-        ]:
+        if booking:
+            booking = Booking.objects.select_for_update().get(
+                pk=booking.pk
+            )
+
+            if booking.status in [
+                Booking.Status.REJECTED,
+                Booking.Status.CANCELLED,
+                Booking.Status.COMPLETED,
+            ]:
+                raise serializers.ValidationError({
+                    "booking": "Payments cannot be recorded for this booking."
+                })
+
+            confirmed, pending = get_payment_totals(
+                booking,
+                "booking"
+            )
+
+            outstanding = (
+                booking.total_amount - confirmed - pending
+            )
+
+        elif sale:
+            sale = Sale.objects.select_for_update().get(
+                pk=sale.pk
+            )
+
+            if sale.status in [
+                Sale.Status.CANCELLED,
+                Sale.Status.COMPLETED,
+            ]:
+                raise serializers.ValidationError({
+                    "sale": "Payments cannot be recorded for this sale."
+                })
+
+            confirmed, pending = get_payment_totals(
+                sale,
+                "sale"
+            )
+
+            outstanding = (
+                sale.total_amount - confirmed - pending
+            )
+
+        else:
             raise serializers.ValidationError({
-                "booking": "Payments cannot be recorded for this booking."
+                "transaction": "Select a booking or sale."
             })
-
-        reserved_payments = Payment.objects.filter(
-            booking=booking,
-            status__in=[
-                Payment.PaymentStatus.PENDING,
-                Payment.PaymentStatus.CONFIRMED,
-            ]
-        ).aggregate(total=Sum("amount"))["total"] or Decimal("0.00")
-
-        outstanding = booking.total_amount - reserved_payments
 
         if amount > outstanding:
             raise serializers.ValidationError({
                 "amount": (
                     f"Payment exceeds the available balance. "
-                    f"Outstanding amount: {outstanding}."
+                    f"Outstanding amount: {max(outstanding, Decimal('0.00'))}."
                 )
             })
 
         serializer.save(recorded_by=self.request.user)
 
 
-class PaymentVerificationView(APIView):
-    permission_classes = [
-        IsAuthenticated,
-        IsAdminOrStorekeeper,
-    ]
+class PaymentVerificationView(
+    BaseFinanceView,
+    APIView
+):
 
     @transaction.atomic
     def post(self, request, pk):
 
-        payment = get_object_or_404(
-            Payment.objects.select_related("booking"),
+        initial_payment = get_object_or_404(
+            Payment.objects.select_related("booking", "sale"),
             pk=pk
         )
 
-        booking = Booking.objects.select_for_update().get(
-            pk=payment.booking_id
-        )
+        if initial_payment.booking_id:
+            booking = Booking.objects.select_for_update().get(
+                pk=initial_payment.booking_id
+            )
+            sale = None
+            total_amount = booking.total_amount
+
+        else:
+            sale = Sale.objects.select_for_update().get(
+                pk=initial_payment.sale_id
+            )
+            booking = None
+            total_amount = sale.total_amount
 
         payment = Payment.objects.select_for_update().get(
             pk=pk
@@ -124,23 +182,32 @@ class PaymentVerificationView(APIView):
                 status=400
             )
 
-        confirmed_total = Payment.objects.filter(
-            booking=booking,
-            status=Payment.PaymentStatus.CONFIRMED,
-        ).exclude(pk=payment.pk).aggregate(
-            total=Sum("amount")
-        )["total"] or Decimal("0.00")
+        if booking:
+            confirmed_total, _ = get_payment_totals(
+                booking,
+                "booking"
+            )
+            transaction_number = booking.booking_number
 
-        if confirmed_total + payment.amount > booking.total_amount:
+        else:
+            confirmed_total, _ = get_payment_totals(
+                sale,
+                "sale"
+            )
+            transaction_number = sale.sale_number
+
+        if confirmed_total + payment.amount > total_amount:
             return Response(
-                {"error": "Confirming this payment would exceed the booking total."},
+                {"error": "Confirming this payment would exceed the transaction total."},
                 status=400
             )
 
+        now = timezone.now()
+
         payment.status = Payment.PaymentStatus.CONFIRMED
         payment.verified_by = request.user
-        payment.verified_at = timezone.now()
-        payment.paid_at = timezone.now()
+        payment.verified_at = now
+        payment.paid_at = now
 
         payment.save(update_fields=[
             "status",
@@ -152,19 +219,17 @@ class PaymentVerificationView(APIView):
 
         return Response({
             "message": "Payment confirmed successfully.",
-            "payment_id": payment.id,
-            "booking_number": booking.booking_number,
+            "transaction_number": transaction_number,
             "amount": str(payment.amount),
             "payment_status": payment.status,
             "verified_by": request.user.username,
         })
 
 
-class BookingPaymentBalanceView(APIView):
-    permission_classes = [
-        IsAuthenticated,
-        IsAdminOrStorekeeper,
-    ]
+class BookingPaymentBalanceView(
+    BaseFinanceView,
+    APIView
+):
 
     def get(self, request, booking_id):
 
@@ -173,26 +238,13 @@ class BookingPaymentBalanceView(APIView):
             pk=booking_id
         )
 
-        payments = Payment.objects.filter(
-            booking=booking
+        confirmed, pending = get_payment_totals(
+            booking,
+            "booking"
         )
 
-        confirmed_amount = payments.filter(
-            status=Payment.PaymentStatus.CONFIRMED
-        ).aggregate(
-            total=Sum("amount")
-        )["total"] or Decimal("0.00")
-
-        pending_amount = payments.filter(
-            status=Payment.PaymentStatus.PENDING
-        ).aggregate(
-            total=Sum("amount")
-        )["total"] or Decimal("0.00")
-
-        total_amount = booking.total_amount
-
-        outstanding_balance = max(
-            total_amount - confirmed_amount,
+        outstanding = max(
+            booking.total_amount - confirmed,
             Decimal("0.00")
         )
 
@@ -201,25 +253,68 @@ class BookingPaymentBalanceView(APIView):
             status=CreditApproval.Status.APPROVED
         ).exists()
 
-        fully_paid = confirmed_amount >= total_amount
+        fully_paid = confirmed >= booking.total_amount
 
         can_dispatch = (
             booking.status == Booking.Status.APPROVED
-            and (
-                fully_paid
-                or credit_approved
-            )
+            and (fully_paid or credit_approved)
         )
 
         return Response({
+            "transaction_type": "BOOKING",
             "booking_number": booking.booking_number,
             "booking_status": booking.status,
-            "total_amount": str(total_amount),
-            "confirmed_payments": str(confirmed_amount),
-            "pending_payments": str(pending_amount),
-            "outstanding_balance": str(outstanding_balance),
+            "total_amount": str(booking.total_amount),
+            "confirmed_payments": str(confirmed),
+            "pending_payments": str(pending),
+            "outstanding_balance": str(outstanding),
             "fully_paid": fully_paid,
             "credit_approved": credit_approved,
             "can_dispatch": can_dispatch,
         })
 
+
+class SalePaymentBalanceView(
+    BaseFinanceView,
+    APIView
+):
+
+    def get(self, request, sale_id):
+
+        sale = get_object_or_404(
+            Sale,
+            pk=sale_id
+        )
+
+        confirmed, pending = get_payment_totals(
+            sale,
+            "sale"
+        )
+
+        outstanding = max(
+            sale.total_amount - confirmed,
+            Decimal("0.00")
+        )
+
+        fully_paid = confirmed >= sale.total_amount
+
+        # Sale credit approval will be implemented separately.
+        credit_approved = False
+
+        can_dispatch = (
+            sale.status == Sale.Status.CONFIRMED
+            and (fully_paid or credit_approved)
+        )
+
+        return Response({
+            "transaction_type": "SALE",
+            "sale_number": sale.sale_number,
+            "sale_status": sale.status,
+            "total_amount": str(sale.total_amount),
+            "confirmed_payments": str(confirmed),
+            "pending_payments": str(pending),
+            "outstanding_balance": str(outstanding),
+            "fully_paid": fully_paid,
+            "credit_approved": credit_approved,
+            "can_dispatch": can_dispatch,
+        })
