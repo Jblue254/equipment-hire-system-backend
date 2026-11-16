@@ -49,6 +49,7 @@ INSTALLED_APPS = [
     "bookings",
     "finance",
     "sales",
+    "transport",
 ]
 
 MIDDLEWARE = [
