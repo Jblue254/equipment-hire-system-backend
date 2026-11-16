@@ -123,3 +123,43 @@ class SaleItem(models.Model):
 
     def __str__(self):
         return f"{self.material.name} - {self.sale.sale_number}"
+
+
+class SaleCreditApproval(models.Model):
+
+    class Status(models.TextChoices):
+        PENDING = "PENDING", "Pending"
+        APPROVED = "APPROVED", "Approved"
+        REJECTED = "REJECTED", "Rejected"
+
+    sale = models.OneToOneField(
+        Sale,
+        on_delete=models.CASCADE,
+        related_name="credit_approval"
+    )
+
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.PENDING
+    )
+
+    reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="sale_credit_reviews"
+    )
+
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+
+    reason = models.TextField(blank=True)
+
+    review_notes = models.TextField(blank=True)
+
+    requested_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.sale.sale_number} - {self.status}"
+

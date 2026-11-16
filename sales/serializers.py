@@ -1,12 +1,10 @@
-
 from decimal import Decimal
 
 from django.db import transaction
 from rest_framework import serializers
 
 from inventory.models import Material
-from .models import Sale, SaleItem
-
+from .models import Sale, SaleItem, SaleCreditApproval
 
 class SaleItemSerializer(serializers.ModelSerializer):
     material_name = serializers.CharField(
@@ -148,13 +146,8 @@ class SaleSerializer(serializers.ModelSerializer):
             quantity = item_data["quantity"]
 
             unit_price = material.selling_price
-
-            if quantity <= 0:
-                raise serializers.ValidationError({
-                    "items": "Quantity must be greater than zero."
-                })
-
             line_total = quantity * unit_price
+
             subtotal += line_total
 
             item_data["unit_price"] = unit_price
@@ -177,4 +170,13 @@ class SaleSerializer(serializers.ModelSerializer):
                 **item_data
             )
 
+        # Automatically create a credit approval request.
+        if sale.payment_arrangement == Sale.PaymentArrangement.CREDIT:
+            SaleCreditApproval.objects.create(
+                sale=sale
+            )
+
         return sale
+
+
+    
