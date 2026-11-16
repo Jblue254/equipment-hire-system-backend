@@ -12,9 +12,9 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from accounts.permissions import IsAdminOrStorekeeper
-from bookings.models import Booking
 from .models import Payment
 from .serializers import PaymentSerializer
+from bookings.models import Booking, CreditApproval
 
 
 class BaseFinanceView:
@@ -158,3 +158,68 @@ class PaymentVerificationView(APIView):
             "payment_status": payment.status,
             "verified_by": request.user.username,
         })
+
+
+class BookingPaymentBalanceView(APIView):
+    permission_classes = [
+        IsAuthenticated,
+        IsAdminOrStorekeeper,
+    ]
+
+    def get(self, request, booking_id):
+
+        booking = get_object_or_404(
+            Booking,
+            pk=booking_id
+        )
+
+        payments = Payment.objects.filter(
+            booking=booking
+        )
+
+        confirmed_amount = payments.filter(
+            status=Payment.PaymentStatus.CONFIRMED
+        ).aggregate(
+            total=Sum("amount")
+        )["total"] or Decimal("0.00")
+
+        pending_amount = payments.filter(
+            status=Payment.PaymentStatus.PENDING
+        ).aggregate(
+            total=Sum("amount")
+        )["total"] or Decimal("0.00")
+
+        total_amount = booking.total_amount
+
+        outstanding_balance = max(
+            total_amount - confirmed_amount,
+            Decimal("0.00")
+        )
+
+        credit_approved = CreditApproval.objects.filter(
+            booking=booking,
+            status=CreditApproval.Status.APPROVED
+        ).exists()
+
+        fully_paid = confirmed_amount >= total_amount
+
+        can_dispatch = (
+            booking.status == Booking.Status.APPROVED
+            and (
+                fully_paid
+                or credit_approved
+            )
+        )
+
+        return Response({
+            "booking_number": booking.booking_number,
+            "booking_status": booking.status,
+            "total_amount": str(total_amount),
+            "confirmed_payments": str(confirmed_amount),
+            "pending_payments": str(pending_amount),
+            "outstanding_balance": str(outstanding_balance),
+            "fully_paid": fully_paid,
+            "credit_approved": credit_approved,
+            "can_dispatch": can_dispatch,
+        })
+

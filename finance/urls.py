@@ -3,6 +3,7 @@ from django.urls import path
 from .views import (
     PaymentListCreateView,
     PaymentVerificationView,
+    BookingPaymentBalanceView,
 )
 
 
@@ -17,5 +18,10 @@ urlpatterns = [
         "payments/<int:pk>/verify/",
         PaymentVerificationView.as_view(),
         name="payment-verify"
+    ),
+    path(
+    "bookings/<int:booking_id>/balance/",
+    BookingPaymentBalanceView.as_view(),
+    name="booking-payment-balance"
     ),
 ]
