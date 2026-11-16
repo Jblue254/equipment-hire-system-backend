@@ -4,9 +4,11 @@ from django.urls import path
 from .views import (
     BookingListCreateView,
     BookingDetailView,
+    BookingDecisionView,
+    BookingDispatchView,
+    BookingReturnListCreateView,
     CreditApprovalListView,
     CreditApprovalDecisionView,
-    BookingDecisionView,
 )
 
 
@@ -35,5 +37,21 @@ urlpatterns = [
         name="credit-approval-decision"
     ),
 
-    path("<int:pk>/decision/",BookingDecisionView.as_view(),name="booking-decision"),
+    path(
+        "<int:pk>/decision/",
+        BookingDecisionView.as_view(),
+        name="booking-decision"
+    ),
+
+    path(
+        "<int:pk>/dispatch/",
+        BookingDispatchView.as_view(),
+        name="booking-dispatch"
+    ),
+
+    path(
+        "returns/",
+        BookingReturnListCreateView.as_view(),
+        name="booking-returns"
+    ),
 ]

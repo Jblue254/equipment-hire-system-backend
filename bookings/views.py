@@ -1,26 +1,35 @@
-
 from django.db import transaction
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
+from decimal import Decimal
+from django.db.models import Sum
 
+from finance.models import Payment
 from rest_framework import generics, serializers
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
-from inventory.models import Equipment, EquipmentUnit
+from inventory.models import (
+    Equipment,
+    EquipmentUnit,
+    MaintenanceRecord,
+)
 from inventory.views import sync_equipment_summary
-
 from accounts.permissions import IsAdminRole, IsAdminOrStorekeeper
-
 from .models import (
     Booking,
+    BookingItem,
+    BookingReturn,
+    ReturnItem,
     CreditApproval,
+    DispatchRecord,
 )
-
 from .serializers import (
     BookingSerializer,
+    BookingReturnSerializer,
     CreditApprovalSerializer,
 )
+
 
 def reserve_booking_equipment(booking):
     """
@@ -334,3 +343,331 @@ class CreditApprovalDecisionView(APIView):
             "booking_status": booking.status,
             "reviewed_by": str(request.user),
         })
+
+
+class BookingDispatchView(APIView):
+    permission_classes = [
+        IsAuthenticated,
+        IsAdminOrStorekeeper,
+    ]
+
+    @transaction.atomic
+    def post(self, request, pk):
+
+        booking = get_object_or_404(
+            Booking.objects.select_for_update(),
+            pk=pk
+        )
+
+        if booking.status != Booking.Status.APPROVED:
+            return Response(
+                {"error": "Only approved bookings can be dispatched."},
+                status=400
+            )
+
+        if DispatchRecord.objects.filter(booking=booking).exists():
+            return Response(
+                {"error": "This booking has already been dispatched."},
+                status=400
+            )
+
+        # Check confirmed payments
+        confirmed_amount = Payment.objects.filter(
+            booking=booking,
+            status=Payment.PaymentStatus.CONFIRMED
+        ).aggregate(
+            total=Sum("amount")
+        )["total"] or Decimal("0.00")
+
+        fully_paid = confirmed_amount >= booking.total_amount
+
+        # Check Admin-approved credit
+        credit_approved = CreditApproval.objects.filter(
+            booking=booking,
+            status=CreditApproval.Status.APPROVED
+        ).exists()
+
+        if not fully_paid and not credit_approved:
+            return Response(
+                {
+                    "error": (
+                        "Dispatch requires full payment "
+                        "or Admin-approved credit."
+                    ),
+                    "total_amount": str(booking.total_amount),
+                    "confirmed_payments": str(confirmed_amount),
+                    "outstanding_balance": str(
+                        max(
+                            booking.total_amount - confirmed_amount,
+                            Decimal("0.00")
+                        )
+                    )
+                },
+                status=400
+            )
+
+        # Confirm that reserved individual units are still reserved
+        items = booking.items.select_related(
+            "equipment",
+            "equipment_unit"
+        ).all()
+
+        for item in items:
+
+            if item.equipment.tracking_type == "INDIVIDUAL":
+
+                unit = EquipmentUnit.objects.select_for_update().get(
+                    pk=item.equipment_unit_id
+                )
+
+                if unit.status != "RESERVED":
+                    return Response(
+                        {
+                            "error": (
+                                f"Equipment unit {unit.asset_number} "
+                                "is not reserved for this booking."
+                            )
+                        },
+                        status=400
+                    )
+
+                unit.status = "HIRED_OUT"
+                unit.save(update_fields=["status", "updated_at"])
+
+        # Create dispatch audit record
+        dispatch = DispatchRecord.objects.create(
+            booking=booking,
+            dispatched_by=request.user,
+            notes=request.data.get("notes", "")
+        )
+
+        # Update individual equipment summary records
+        for item in items:
+            if item.equipment.tracking_type == "INDIVIDUAL":
+                sync_equipment_summary(item.equipment)
+
+        booking.status = Booking.Status.ACTIVE
+        booking.save(update_fields=["status", "updated_at"])
+
+        return Response({
+            "message": "Equipment dispatched successfully.",
+            "booking_number": booking.booking_number,
+            "booking_status": booking.status,
+            "dispatch_id": dispatch.id,
+            "dispatched_by": request.user.username,
+            "dispatched_at": dispatch.dispatched_at,
+        }, status=200)
+
+
+# BOOKING RETURNS
+
+class BookingReturnListCreateView(
+    BaseBookingView,
+    generics.ListCreateAPIView
+):
+    serializer_class = BookingReturnSerializer
+
+    def get_queryset(self):
+        queryset = BookingReturn.objects.select_related(
+            "booking",
+            "received_by"
+        ).prefetch_related(
+            "items",
+            "items__booking_item",
+            "items__booking_item__equipment"
+        )
+
+        booking_id = self.request.query_params.get("booking")
+
+        if booking_id:
+            queryset = queryset.filter(booking_id=booking_id)
+
+        return queryset
+
+    @transaction.atomic
+    def perform_create(self, serializer):
+
+        booking_id = serializer.validated_data["booking"].pk
+
+        # Lock the booking to prevent simultaneous return processing.
+        booking = Booking.objects.select_for_update().get(
+            pk=booking_id
+        )
+
+        if booking.status not in [
+            Booking.Status.ACTIVE,
+            Booking.Status.OVERDUE,
+        ]:
+            raise serializers.ValidationError({
+                "booking": "Only active or overdue bookings can receive returns."
+            })
+
+        return_items = serializer.validated_data.get("items", [])
+
+        if not return_items:
+            raise serializers.ValidationError({
+                "items": "At least one returned item is required."
+            })
+
+        # Lock the booking items and verify cumulative return quantities.
+        booking_items = {
+            item.pk: item
+            for item in BookingItem.objects.select_for_update().filter(
+                booking=booking
+            )
+        }
+
+        for return_data in return_items:
+
+            booking_item = return_data["booking_item"]
+            quantity = return_data["quantity_returned"]
+
+            if booking_item.pk not in booking_items:
+                raise serializers.ValidationError({
+                    "items": "An item does not belong to this booking."
+                })
+
+            previous_quantity = (
+                ReturnItem.objects.filter(
+                    booking_item=booking_item
+                ).aggregate(
+                    total=Sum("quantity_returned")
+                )["total"] or 0
+            )
+
+            if previous_quantity + quantity > booking_item.quantity:
+                raise serializers.ValidationError({
+                    "items": (
+                        f"Return quantity exceeds the outstanding "
+                        f"quantity for {booking_item.equipment.name}."
+                    )
+                })
+
+            equipment = booking_item.equipment
+
+            if equipment.tracking_type == "INDIVIDUAL":
+
+                if quantity != 1:
+                    raise serializers.ValidationError({
+                        "quantity_returned": (
+                            "Individual equipment must be returned one unit at a time."
+                        )
+                    })
+
+                unit = EquipmentUnit.objects.select_for_update().get(
+                    pk=booking_item.equipment_unit_id
+                )
+
+                if unit.status != EquipmentUnit.Status.HIRED_OUT:
+                    raise serializers.ValidationError({
+                        "equipment_unit": (
+                            f"Unit {unit.asset_number} is not currently hired out."
+                        )
+                    })
+
+        # Create the return and its nested return items.
+        booking_return = serializer.save(
+            received_by=self.request.user
+        )
+
+        # Update equipment condition and availability.
+        affected_equipment = {}
+
+        for returned_item in booking_return.items.select_related(
+            "booking_item",
+            "booking_item__equipment",
+            "booking_item__equipment_unit"
+        ):
+
+            booking_item = returned_item.booking_item
+            equipment = Equipment.objects.select_for_update().get(
+                pk=booking_item.equipment_id
+            )
+
+            affected_equipment[equipment.pk] = equipment
+
+            if returned_item.condition == ReturnItem.Condition.MISSING:
+                # Missing equipment remains unavailable.
+                continue
+
+            if equipment.tracking_type == "INDIVIDUAL":
+
+                unit = EquipmentUnit.objects.select_for_update().get(
+                    pk=booking_item.equipment_unit_id
+                )
+
+                if returned_item.condition == ReturnItem.Condition.GOOD:
+                    unit.status = EquipmentUnit.Status.AVAILABLE
+
+                elif returned_item.condition == ReturnItem.Condition.DAMAGED:
+                    unit.status = EquipmentUnit.Status.UNDER_MAINTENANCE
+
+                    MaintenanceRecord.objects.create(
+                        equipment=equipment,
+                        unit=unit,
+                        quantity_affected=1,
+                        maintenance_type=MaintenanceRecord.MaintenanceType.REPAIR,
+                        problem_reported=(
+                            returned_item.notes
+                            or "Equipment returned in damaged condition."
+                        ),
+                        recorded_by=self.request.user,
+                        condition_cleared=False,
+                    )
+
+                unit.save(update_fields=[
+                    "status",
+                    "updated_at"
+                ])
+
+            else:
+                if returned_item.condition == ReturnItem.Condition.GOOD:
+
+                    equipment.available_quantity += (
+                        returned_item.quantity_returned
+                    )
+
+                elif returned_item.condition == ReturnItem.Condition.DAMAGED:
+
+                    # Damaged quantity remains unavailable.
+                    MaintenanceRecord.objects.create(
+                        equipment=equipment,
+                        quantity_affected=returned_item.quantity_returned,
+                        maintenance_type=MaintenanceRecord.MaintenanceType.REPAIR,
+                        problem_reported=(
+                            returned_item.notes
+                            or "Equipment returned in damaged condition."
+                        ),
+                        recorded_by=self.request.user,
+                        condition_cleared=False,
+                    )
+
+        # Synchronize equipment summary records.
+        for equipment in affected_equipment.values():
+            sync_equipment_summary(equipment)
+
+        # Complete the booking when every booked quantity has
+        # been returned or recorded as missing.
+        all_accounted_for = True
+
+        for booking_item in booking.items.all():
+
+            accounted_quantity = (
+                ReturnItem.objects.filter(
+                    booking_item=booking_item
+                ).aggregate(
+                    total=Sum("quantity_returned")
+                )["total"] or 0
+            )
+
+            if accounted_quantity < booking_item.quantity:
+                all_accounted_for = False
+                break
+
+        if all_accounted_for:
+            booking.status = Booking.Status.COMPLETED
+            booking.save(update_fields=[
+                "status",
+                "updated_at"
+            ])
+

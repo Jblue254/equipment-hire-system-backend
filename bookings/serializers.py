@@ -2,6 +2,7 @@
 from decimal import Decimal
 from uuid import uuid4
 
+from django.db import models
 from django.utils import timezone
 
 from rest_framework import serializers
@@ -13,7 +14,6 @@ from .models import (
     BookingReturn,
     ReturnItem,
 )
-
 
 
 class BookingItemSerializer(serializers.ModelSerializer):
@@ -42,6 +42,7 @@ class BookingItemSerializer(serializers.ModelSerializer):
             "duration_units",
             "line_total",
         ]
+
         read_only_fields = [
             "id",
             "hire_rate",
@@ -55,18 +56,24 @@ class BookingItemSerializer(serializers.ModelSerializer):
         rate_period = attrs.get("rate_period")
         duration_units = attrs.get("duration_units", 1)
 
+        if not equipment.is_active:
+            raise serializers.ValidationError({
+                "equipment": "This equipment is inactive."
+            })
+
         if quantity < 1:
-            raise serializers.ValidationError(
-                {"quantity": "Quantity must be at least 1."}
-            )
+            raise serializers.ValidationError({
+                "quantity": "Quantity must be at least 1."
+            })
 
         if duration_units < 1:
-            raise serializers.ValidationError(
-                {"duration_units": "Duration must be at least 1."}
-            )
+            raise serializers.ValidationError({
+                "duration_units": "Duration must be at least 1."
+            })
 
-        # Validate equipment tracking type
+        # Individual equipment validation
         if equipment.tracking_type == "INDIVIDUAL":
+
             if not equipment_unit:
                 raise serializers.ValidationError({
                     "equipment_unit": "Select an individual equipment unit."
@@ -82,18 +89,18 @@ class BookingItemSerializer(serializers.ModelSerializer):
                     "quantity": "Individual equipment quantity must be 1."
                 })
 
+            if equipment_unit.status != "AVAILABLE":
+                raise serializers.ValidationError({
+                    "equipment_unit": "This equipment unit is not currently available."
+                })
+
+        # Quantity-based equipment validation
         elif equipment.tracking_type == "QUANTITY":
+
             if equipment_unit:
                 raise serializers.ValidationError({
-                    "equipment_unit": "Quantity-based equipment cannot use an individual unit."
+                    "equipment_unit": "Quantity-based equipment cannot use individual units."
                 })
-            
-            if not equipment.is_active:
-
-                raise serializers.ValidationError({
-                    "equipment": "This equipment is inactive."
-                })
-            
 
             if quantity > equipment.available_quantity:
                 raise serializers.ValidationError({
@@ -102,31 +109,20 @@ class BookingItemSerializer(serializers.ModelSerializer):
                         "are currently available."
                     )
                 })
-            
-            # Calculate hire rate from the equipment record
-            rate_field = f"{rate_period.lower()}_rate"
-            actual_rate = getattr(equipment, rate_field, None)
 
-            if actual_rate is None or actual_rate <= 0:
-                            raise serializers.ValidationError({
-                                "rate_period": "The selected hire rate is not configured for this equipment."
-                            })
-            
-            # Never trust a price submitted by the frontend
-            attrs["hire_rate"] = actual_rate
+        # Calculate the correct rate for both tracking types
+        rate_field = f"{rate_period.lower()}_rate"
+        actual_rate = getattr(equipment, rate_field, None)
 
-            return attrs
-        if equipment_unit.status != "AVAILABLE":
-
+        if actual_rate is None or actual_rate <= 0:
             raise serializers.ValidationError({
-                "equipment_unit": "This equipment unit is not currently available."
+                "rate_period": "The selected hire rate is not configured for this equipment."
             })
-        
 
-        if not equipment.is_active:
-            raise serializers.ValidationError({
-                "equipment": "This equipment is inactive."
-            })
+        attrs["hire_rate"] = actual_rate
+
+        return attrs
+
 
 class BookingSerializer(serializers.ModelSerializer):
 
@@ -271,6 +267,7 @@ class CreditApprovalSerializer(serializers.ModelSerializer):
         )
 
 
+
 class ReturnItemSerializer(serializers.ModelSerializer):
 
     equipment_name = serializers.CharField(
@@ -280,10 +277,28 @@ class ReturnItemSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = ReturnItem
-
         fields = "__all__"
 
-        read_only_fields = ("id",)
+        read_only_fields = [
+            "id",
+        ]
+
+    def validate_quantity_returned(self, value):
+        if value < 1:
+            raise serializers.ValidationError(
+                "Returned quantity must be at least 1."
+            )
+
+        return value
+
+    def validate_damage_charge(self, value):
+        if value < Decimal("0.00"):
+            raise serializers.ValidationError(
+                "Damage charge cannot be negative."
+            )
+
+        return value
+
 
 
 class BookingReturnSerializer(serializers.ModelSerializer):
@@ -292,23 +307,75 @@ class BookingReturnSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = BookingReturn
-
         fields = "__all__"
 
-        read_only_fields = (
+        read_only_fields = [
             "id",
             "received_by",
             "created_at",
-        )
+        ]
 
     def validate(self, attrs):
 
+        booking = attrs.get("booking")
         items = attrs.get("items")
 
         if not items:
             raise serializers.ValidationError({
                 "items": "A return must contain at least one item."
             })
+
+        if booking.status not in [
+            Booking.Status.ACTIVE,
+            Booking.Status.OVERDUE,
+        ]:
+            raise serializers.ValidationError({
+                "booking": "Only active or overdue bookings can be returned."
+            })
+
+        seen_items = set()
+
+        for item_data in items:
+
+            booking_item = item_data["booking_item"]
+            quantity = item_data["quantity_returned"]
+
+            if booking_item.booking_id != booking.id:
+                raise serializers.ValidationError({
+                    "items": (
+                        f"{booking_item.equipment.name} does not belong "
+                        "to this booking."
+                    )
+                })
+
+            if booking_item.id in seen_items:
+                raise serializers.ValidationError({
+                    "items": "An equipment item cannot appear twice in one return."
+                })
+
+            seen_items.add(booking_item.id)
+
+            previous_returns = ReturnItem.objects.filter(
+                booking_item=booking_item
+            ).aggregate(
+                total=models.Sum("quantity_returned")
+            )["total"] or 0
+
+            outstanding = booking_item.quantity - previous_returns
+
+            if quantity > outstanding:
+                raise serializers.ValidationError({
+                    "items": (
+                        f"Only {outstanding} units of "
+                        f"{booking_item.equipment.name} remain outstanding."
+                    )
+                })
+
+            if booking_item.equipment.tracking_type == "INDIVIDUAL":
+                if quantity != 1:
+                    raise serializers.ValidationError({
+                        "items": "Individual equipment must be returned one unit at a time."
+                    })
 
         return attrs
 
