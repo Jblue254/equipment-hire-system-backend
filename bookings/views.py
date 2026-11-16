@@ -587,7 +587,24 @@ class BookingReturnListCreateView(
             affected_equipment[equipment.pk] = equipment
 
             if returned_item.condition == ReturnItem.Condition.MISSING:
-                # Missing equipment remains unavailable.
+
+                if equipment.tracking_type == "INDIVIDUAL":
+                    unit = EquipmentUnit.objects.select_for_update().get(
+                        pk=booking_item.equipment_unit_id
+                    )
+
+                    unit.status = EquipmentUnit.Status.LOST
+                    unit.condition_notes = (
+                        returned_item.notes or "Equipment declared missing."
+                    )
+
+                    unit.save(update_fields=[
+                        "status",
+                        "condition_notes",
+                        "updated_at"
+                    ])
+
+                # Missing quantity-based equipment remains unavailable.
                 continue
 
             if equipment.tracking_type == "INDIVIDUAL":

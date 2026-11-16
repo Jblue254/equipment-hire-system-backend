@@ -219,6 +219,7 @@ class EquipmentUnit(models.Model):
         UNDER_MAINTENANCE = "UNDER_MAINTENANCE", "Under Maintenance"
         DAMAGED = "DAMAGED", "Damaged"
         RETIRED = "RETIRED", "Retired"
+        LOST = "LOST", "Lost"
 
     equipment = models.ForeignKey(
         Equipment,
