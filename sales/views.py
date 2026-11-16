@@ -7,15 +7,17 @@ from django.shortcuts import get_object_or_404
 
 from rest_framework import generics, serializers
 from rest_framework.permissions import IsAuthenticated
+from rest_framework import status
+from django.utils import timezone
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from accounts.permissions import IsAdminOrStorekeeper
+from accounts.permissions import IsAdminOrStorekeeper, IsAdminRole
 from inventory.models import Material, StockMovement
 
-from .models import Sale, SaleItem
+from .models import Sale, SaleItem, SaleCreditApproval
 from .serializers import SaleSerializer
-
+from finance.models import Payment
 
 class BaseSalesView:
     permission_classes = [
@@ -96,10 +98,16 @@ class SaleConfirmationView(
             )
 
         if sale.payment_arrangement == Sale.PaymentArrangement.CREDIT:
-            return Response(
-                {"detail": "Credit sales require Admin approval."},
-                status=400
-            )
+
+            approval = SaleCreditApproval.objects.filter(
+                sale=sale
+            ).first()
+
+            if not approval or approval.status != SaleCreditApproval.Status.APPROVED:
+                return Response(
+                    {"detail": "This credit sale has not been approved by Admin."},
+                    status=400
+                )
 
         sale_items = list(
             SaleItem.objects.filter(
@@ -244,9 +252,13 @@ class SaleDispatchView(
     APIView
 ):
 
+    @transaction.atomic
     def post(self, request, pk):
 
-        sale = get_object_or_404(Sale, pk=pk)
+        sale = get_object_or_404(
+            Sale.objects.select_for_update(),
+            pk=pk
+        )
 
         if sale.status != Sale.Status.CONFIRMED:
             return Response(
@@ -254,15 +266,53 @@ class SaleDispatchView(
                 status=400
             )
 
+        # Credit sales require Admin approval.
+        if sale.payment_arrangement == Sale.PaymentArrangement.CREDIT:
+
+            approval = SaleCreditApproval.objects.filter(
+                sale=sale
+            ).first()
+
+            if not approval or approval.status != SaleCreditApproval.Status.APPROVED:
+                return Response(
+                    {"detail": "Credit sale has not been approved by Admin."},
+                    status=400
+                )
+
+        # Full-payment sales must be fully paid.
+        else:
+
+            confirmed_payments = Payment.objects.filter(
+                sale=sale,
+                status=Payment.Status.CONFIRMED
+            ).aggregate(
+                total=Sum("amount")
+            )["total"] or Decimal("0.00")
+
+            outstanding = sale.total_amount - confirmed_payments
+
+            if outstanding > 0:
+                return Response({
+                    "detail": "Full payment is required before dispatch.",
+                    "total_amount": str(sale.total_amount),
+                    "amount_paid": str(confirmed_payments),
+                    "outstanding_balance": str(outstanding),
+                }, status=400)
+
         sale.status = Sale.Status.DISPATCHED
+
         sale.save(update_fields=[
             "status",
             "updated_at"
         ])
 
         return Response({
-            "detail": "Sale marked as dispatched."
+            "detail": "Sale marked as dispatched.",
+            "sale_number": sale.sale_number,
+            "status": sale.status,
         })
+
+
 
 
 class SaleCompletionView(
@@ -292,3 +342,113 @@ class SaleCompletionView(
         return Response({
             "detail": "Sale completed successfully."
         })
+
+class SaleCreditApprovalListView(
+    BaseSalesView,
+    generics.ListAPIView
+):
+    permission_classes = [
+        IsAuthenticated,
+        IsAdminRole,
+    ]
+
+    def get_queryset(self):
+        queryset = SaleCreditApproval.objects.select_related(
+            "sale",
+            "reviewed_by"
+        ).order_by("-requested_at")
+
+        approval_status = self.request.query_params.get("status")
+
+        if approval_status:
+            queryset = queryset.filter(status=approval_status)
+
+        return queryset
+
+    def list(self, request, *args, **kwargs):
+        approvals = self.get_queryset()
+
+        data = []
+
+        for approval in approvals:
+            data.append({
+                "id": approval.id,
+                "sale_id": approval.sale_id,
+                "sale_number": approval.sale.sale_number,
+                "customer_name": approval.sale.customer_name,
+                "customer_phone": approval.sale.customer_phone,
+                "total_amount": approval.sale.total_amount,
+                "status": approval.status,
+                "reviewed_by": (
+                    approval.reviewed_by.username
+                    if approval.reviewed_by else None
+                ),
+                "reviewed_at": approval.reviewed_at,
+                "reason": approval.reason,
+                "review_notes": approval.review_notes,
+                "requested_at": approval.requested_at,
+            })
+
+        return Response(data)
+
+
+class SaleCreditApprovalDecisionView(
+    BaseSalesView,
+    APIView
+):
+    permission_classes = [
+        IsAuthenticated,
+        IsAdminRole,
+    ]
+
+    @transaction.atomic
+    def post(self, request, pk):
+
+        approval = get_object_or_404(
+            SaleCreditApproval.objects.select_for_update().select_related("sale"),
+            pk=pk
+        )
+
+        if approval.status != SaleCreditApproval.Status.PENDING:
+            return Response(
+                {"detail": "This credit request has already been reviewed."},
+                status=400
+            )
+
+        decision = request.data.get("status")
+
+        if decision not in [
+            SaleCreditApproval.Status.APPROVED,
+            SaleCreditApproval.Status.REJECTED,
+        ]:
+            return Response(
+                {"detail": "Choose APPROVED or REJECTED."},
+                status=400
+            )
+
+        if approval.sale.status != Sale.Status.PENDING:
+            return Response(
+                {"detail": "Only pending sales can receive credit approval."},
+                status=400
+            )
+
+        approval.status = decision
+        approval.reviewed_by = request.user
+        approval.reviewed_at = timezone.now()
+        approval.review_notes = request.data.get("review_notes", "")
+
+        approval.save(update_fields=[
+            "status",
+            "reviewed_by",
+            "reviewed_at",
+            "review_notes",
+        ])
+
+        return Response({
+            "detail": f"Credit request {decision.lower()} successfully.",
+            "sale_number": approval.sale.sale_number,
+            "approval_status": approval.status,
+            "reviewed_by": request.user.username,
+            "reviewed_at": approval.reviewed_at,
+        })
+

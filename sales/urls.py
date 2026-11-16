@@ -8,6 +8,8 @@ from .views import (
     SaleCancellationView,
     SaleDispatchView,
     SaleCompletionView,
+    SaleCreditApprovalListView,
+    SaleCreditApprovalDecisionView,
 )
 
 urlpatterns = [
@@ -32,5 +34,16 @@ urlpatterns = [
         "<int:pk>/complete/",
         SaleCompletionView.as_view(),
         name="sale-complete"
+    ),
+    path(
+    "credit-approvals/",
+    SaleCreditApprovalListView.as_view(),
+    name="sale-credit-approvals"
+    ),
+
+    path(
+    "credit-approvals/<int:pk>/decision/",
+    SaleCreditApprovalDecisionView.as_view(),
+    name="sale-credit-approval-decision"
     ),
 ]
