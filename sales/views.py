@@ -174,6 +174,7 @@ class SaleConfirmationView(
         })
 
 
+
 class SaleCancellationView(
     BaseSalesView,
     APIView
@@ -196,8 +197,24 @@ class SaleCancellationView(
                 status=400
             )
 
-        # Stock restoration for confirmed sales will be
-        # handled through a controlled stock movement.
+        # Check for confirmed payments.
+        confirmed_payments = Payment.objects.filter(
+            sale=sale,
+            status=Payment.Status.CONFIRMED
+        ).aggregate(
+            total=Sum("amount")
+        )["total"] or Decimal("0.00")
+
+        if confirmed_payments > 0:
+            return Response({
+                "detail": (
+                    "This sale has confirmed payments. "
+                    "Process a refund or payment reversal before cancellation."
+                ),
+                "amount_paid": str(confirmed_payments),
+            }, status=400)
+
+        # Restore stock for confirmed sales.
         if sale.status == Sale.Status.CONFIRMED:
 
             sale_items = list(
@@ -237,6 +254,7 @@ class SaleCancellationView(
                 )
 
         sale.status = Sale.Status.CANCELLED
+
         sale.save(update_fields=[
             "status",
             "updated_at"
@@ -245,6 +263,7 @@ class SaleCancellationView(
         return Response({
             "detail": "Sale cancelled successfully."
         })
+
 
 
 class SaleDispatchView(
