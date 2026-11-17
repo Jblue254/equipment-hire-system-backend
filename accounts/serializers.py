@@ -32,6 +32,19 @@ class CreateUserSerializer(serializers.ModelSerializer):
             "role",
         ]
 
+    def validate_role(self, value):
+        allowed_roles = [
+            User.Role.ADMIN,
+            User.Role.STOREKEEPER,
+        ]
+
+        if value not in allowed_roles:
+            raise serializers.ValidationError(
+                "Only Admin and Storekeeper roles are allowed."
+            )
+
+        return value
+
     def create(self, validated_data):
         password = validated_data.pop("password")
 

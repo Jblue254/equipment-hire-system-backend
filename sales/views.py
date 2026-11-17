@@ -1,9 +1,15 @@
-
 from decimal import Decimal
 
 from django.db import transaction
 from django.db.models import Sum
 from django.shortcuts import get_object_or_404
+from django.contrib.auth import get_user_model
+
+from notifications.models import Notification
+from notifications.services import notify_users
+from notifications.utils import get_notification_recipients
+
+User = get_user_model()
 
 from rest_framework import generics, serializers
 from rest_framework.permissions import IsAuthenticated
@@ -58,10 +64,41 @@ class SaleListCreateView(
             )
 
         return queryset
-
+    
     @transaction.atomic
     def perform_create(self, serializer):
-        serializer.save(created_by=self.request.user)
+        sale = serializer.save(created_by=self.request.user)
+
+        recipients = get_notification_recipients()
+
+        notify_users(
+            recipients,
+            title="New Material Sale",
+            message=(
+                f"Sale {sale.sale_number} for "
+                f"{sale.customer_name} has been received."
+            ),
+            notification_type=Notification.NotificationType.SALE,
+            related_object_type="sale",
+            related_object_id=sale.id,
+        )
+
+        if sale.payment_arrangement == Sale.PaymentArrangement.CREDIT:
+            admin_recipients = recipients.filter(
+                role=User.Role.ADMIN
+            )
+
+            notify_users(
+                admin_recipients,
+                title="Sale Credit Approval Required",
+                message=(
+                    f"Sale {sale.sale_number} requires "
+                    f"Admin credit approval."
+                ),
+                notification_type=Notification.NotificationType.CREDIT,
+                related_object_type="sale",
+                related_object_id=sale.id,
+            )
 
 
 class SaleDetailView(
@@ -162,11 +199,24 @@ class SaleConfirmationView(
                 recorded_by=request.user
             )
 
+
         sale.status = Sale.Status.CONFIRMED
         sale.save(update_fields=[
             "status",
             "updated_at"
         ])
+
+        notify_users(
+    get_notification_recipients(),
+    title="Sale Confirmed",
+    message=(
+        f"Sale {sale.sale_number} has been confirmed. "
+        "Material stock has been deducted."
+    ),
+    notification_type=Notification.NotificationType.SALE,
+    related_object_type="sale",
+    related_object_id=sale.id,
+)
 
         return Response({
             "detail": "Sale confirmed and stock deducted.",
@@ -260,6 +310,15 @@ class SaleCancellationView(
             "updated_at"
         ])
 
+        notify_users(
+    get_notification_recipients(),
+    title="Sale Cancelled",
+    message=f"Sale {sale.sale_number} has been cancelled.",
+    notification_type=Notification.NotificationType.SALE,
+    related_object_type="sale",
+    related_object_id=sale.id,
+)
+
         return Response({
             "detail": "Sale cancelled successfully."
         })
@@ -325,6 +384,18 @@ class SaleDispatchView(
             "updated_at"
         ])
 
+        notify_users(
+    get_notification_recipients(),
+    title="Sale Dispatched",
+    message=(
+        f"Sale {sale.sale_number} for {sale.customer_name} "
+        "has been dispatched."
+    ),
+    notification_type=Notification.NotificationType.SALE,
+    related_object_type="sale",
+    related_object_id=sale.id,
+)
+
         return Response({
             "detail": "Sale marked as dispatched.",
             "sale_number": sale.sale_number,
@@ -338,29 +409,43 @@ class SaleCompletionView(
     BaseSalesView,
     APIView
 ):
-
+    
+    @transaction.atomic
     def post(self, request, pk):
 
-        sale = get_object_or_404(Sale, pk=pk)
+        sale = get_object_or_404(
+            Sale.objects.select_for_update(),
+            pk=pk
+        )
 
-        if sale.status not in [
-            Sale.Status.READY,
-            Sale.Status.DISPATCHED,
-        ]:
+        if sale.status != Sale.Status.DISPATCHED:
             return Response(
-                {"detail": "Sale is not ready for completion."},
+                {"detail": "Only dispatched sales can be completed."},
                 status=400
             )
 
         sale.status = Sale.Status.COMPLETED
+
         sale.save(update_fields=[
             "status",
             "updated_at"
         ])
 
+        notify_users(
+    get_notification_recipients(),
+    title="Sale Completed",
+    message=f"Sale {sale.sale_number} has been completed.",
+    notification_type=Notification.NotificationType.SALE,
+    related_object_type="sale",
+    related_object_id=sale.id,
+)
+
         return Response({
-            "detail": "Sale completed successfully."
+            "detail": "Sale marked as completed.",
+            "sale_number": sale.sale_number,
+            "status": sale.status,
         })
+
 
 class SaleCreditApprovalListView(
     BaseSalesView,
@@ -424,10 +509,12 @@ class SaleCreditApprovalDecisionView(
     def post(self, request, pk):
 
         approval = get_object_or_404(
-            SaleCreditApproval.objects.select_for_update().select_related("sale"),
+            SaleCreditApproval.objects.select_for_update(),
             pk=pk
         )
-
+        sale = Sale.objects.select_for_update().get(
+            pk=approval.sale_id
+        )
         if approval.status != SaleCreditApproval.Status.PENDING:
             return Response(
                 {"detail": "This credit request has already been reviewed."},
@@ -445,7 +532,7 @@ class SaleCreditApprovalDecisionView(
                 status=400
             )
 
-        if approval.sale.status != Sale.Status.PENDING:
+        if sale.status != Sale.Status.PENDING:
             return Response(
                 {"detail": "Only pending sales can receive credit approval."},
                 status=400
@@ -463,11 +550,24 @@ class SaleCreditApprovalDecisionView(
             "review_notes",
         ])
 
+        if sale.created_by:
+            notify_users(
+                [sale.created_by],
+                title="Sale Credit Decision",
+                message=(
+                    f"Credit request for sale {sale.sale_number} "
+                    f"has been {approval.status.lower()}."
+                ),
+                notification_type=Notification.NotificationType.CREDIT,
+                related_object_type="sale",
+                related_object_id=sale.id,
+            )
+
         return Response({
             "detail": f"Credit request {decision.lower()} successfully.",
-            "sale_number": approval.sale.sale_number,
+            "sale_number": sale.sale_number,
             "approval_status": approval.status,
             "reviewed_by": request.user.username,
             "reviewed_at": approval.reviewed_at,
+            
         })
-
