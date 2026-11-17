@@ -3,6 +3,13 @@ from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from decimal import Decimal
 from django.db.models import Sum
+from django.contrib.auth import get_user_model
+
+from notifications.models import Notification
+from notifications.services import notify_users
+from notifications.utils import get_notification_recipients
+
+User = get_user_model()
 
 from finance.models import Payment
 from rest_framework import generics, serializers
@@ -148,10 +155,48 @@ class BookingListCreateView(
         return queryset
 
     @transaction.atomic
+
     def perform_create(self, serializer):
-        serializer.save(
+        booking = serializer.save(
             created_by=self.request.user
         )
+
+        recipients = get_notification_recipients()
+
+        # Notify Admin and Storekeeper about the new booking.
+        notify_users(
+            recipients,
+            title="New Booking Received",
+            message=(
+                f"Booking {booking.booking_number} from "
+                f"{booking.customer_name} is awaiting review."
+            ),
+            notification_type=Notification.NotificationType.BOOKING,
+            related_object_type="booking",
+            related_object_id=booking.id,
+        )
+
+        # Credit requests require Admin approval.
+        if booking.payment_arrangement == Booking.PaymentArrangement.CREDIT:
+            admin_recipients = recipients.filter(
+                role=User.Role.ADMIN
+            )
+
+            notify_users(
+                admin_recipients,
+                title="Credit Approval Required",
+                message=(
+                    f"Booking {booking.booking_number} requires "
+                    f"credit approval."
+                ),
+                notification_type=Notification.NotificationType.CREDIT,
+                related_object_type="booking",
+                related_object_id=booking.id,
+            )
+
+    
+
+
 
 
 class BookingDetailView(
@@ -230,12 +275,26 @@ class BookingDecisionView(APIView):
 
         booking.save(update_fields=["status", "updated_at"])
 
+        if booking.created_by:
+            notify_users(
+                [booking.created_by],
+                title="Booking Decision",
+                message=(
+                    f"Booking {booking.booking_number} has been "
+                    f"{booking.status.lower()}."
+                ),
+                notification_type=Notification.NotificationType.BOOKING,
+                related_object_type="booking",
+                related_object_id=booking.id,
+            )
+
         return Response({
             "message": f"Booking {decision.lower()}d successfully.",
             "booking_number": booking.booking_number,
             "status": booking.status
         })
 
+        
 
 # CREDIT REQUESTS
 
@@ -335,6 +394,20 @@ class CreditApprovalDecisionView(APIView):
             "status",
             "updated_at",
         ])
+
+        if booking.created_by:
+
+            notify_users(
+                [booking.created_by],
+                title="Credit Approval Decision",
+                message=(
+                    f"Credit request for booking {booking.booking_number} "
+                    f"has been {approval.status.lower()}."
+                ),
+                notification_type=Notification.NotificationType.CREDIT,
+                related_object_type="booking",
+                related_object_id=booking.id,
+            )
 
         return Response({
             "message": f"Credit request {decision.lower()} successfully.",
@@ -448,6 +521,19 @@ class BookingDispatchView(APIView):
 
         booking.status = Booking.Status.ACTIVE
         booking.save(update_fields=["status", "updated_at"])
+
+
+        notify_users(
+            get_notification_recipients(),
+            title="Equipment Dispatched",
+            message=(
+                f"Booking {booking.booking_number} for "
+                f"{booking.customer_name} has been dispatched."
+            ),
+            notification_type=Notification.NotificationType.EQUIPMENT,
+            related_object_type="booking",
+            related_object_id=booking.id,
+        )
 
         return Response({
             "message": "Equipment dispatched successfully.",
@@ -570,8 +656,15 @@ class BookingReturnListCreateView(
             received_by=self.request.user
         )
 
+
         # Update equipment condition and availability.
         affected_equipment = {}
+
+
+        good_returns = []
+        damaged_returns = []
+        missing_returns = []
+
 
         for returned_item in booking_return.items.select_related(
             "booking_item",
@@ -587,6 +680,10 @@ class BookingReturnListCreateView(
             affected_equipment[equipment.pk] = equipment
 
             if returned_item.condition == ReturnItem.Condition.MISSING:
+
+                missing_returns.append(
+                    f"{equipment.name} (quantity: {returned_item.quantity_returned})"
+                )
 
                 if equipment.tracking_type == "INDIVIDUAL":
                     unit = EquipmentUnit.objects.select_for_update().get(
@@ -614,9 +711,15 @@ class BookingReturnListCreateView(
                 )
 
                 if returned_item.condition == ReturnItem.Condition.GOOD:
+                    good_returns.append(
+                        f"{equipment.name} (quantity: {returned_item.quantity_returned})"
+                    )
                     unit.status = EquipmentUnit.Status.AVAILABLE
 
                 elif returned_item.condition == ReturnItem.Condition.DAMAGED:
+                    damaged_returns.append(
+                        f"{equipment.name} (quantity: {returned_item.quantity_returned})"
+                    )
                     unit.status = EquipmentUnit.Status.UNDER_MAINTENANCE
 
                     MaintenanceRecord.objects.create(
@@ -639,12 +742,18 @@ class BookingReturnListCreateView(
 
             else:
                 if returned_item.condition == ReturnItem.Condition.GOOD:
+                    good_returns.append(
+                        f"{equipment.name} (quantity: {returned_item.quantity_returned})"
+                    )
 
                     equipment.available_quantity += (
                         returned_item.quantity_returned
                     )
 
                 elif returned_item.condition == ReturnItem.Condition.DAMAGED:
+                    damaged_returns.append(
+                        f"{equipment.name} (quantity: {returned_item.quantity_returned})"
+                    )
 
                     # Damaged quantity remains unavailable.
                     MaintenanceRecord.objects.create(
@@ -662,6 +771,49 @@ class BookingReturnListCreateView(
         # Synchronize equipment summary records.
         for equipment in affected_equipment.values():
             sync_equipment_summary(equipment)
+
+        # Send return notifications once, after processing all items.
+        recipients = get_notification_recipients()
+
+        if good_returns:
+            notify_users(
+                recipients,
+                title="Equipment Returned",
+                message=(
+                    f"Booking {booking.booking_number}: "
+                    f"Good condition: {', '.join(good_returns)}."
+                ),
+                notification_type=Notification.NotificationType.EQUIPMENT,
+                related_object_type="booking",
+                related_object_id=booking.id,
+            )
+
+        if damaged_returns:
+            notify_users(
+                recipients,
+                title="Damaged Equipment Returned",
+                message=(
+                    f"Booking {booking.booking_number}: "
+                    f"{', '.join(damaged_returns)}. "
+                    "Maintenance attention is required."
+                ),
+                notification_type=Notification.NotificationType.MAINTENANCE,
+                related_object_type="booking",
+                related_object_id=booking.id,
+            )
+
+        if missing_returns:
+            notify_users(
+                recipients,
+                title="Missing Equipment Reported",
+                message=(
+                    f"Booking {booking.booking_number}: "
+                    f"{', '.join(missing_returns)} reported missing."
+                ),
+                notification_type=Notification.NotificationType.EQUIPMENT,
+                related_object_type="booking",
+                related_object_id=booking.id,
+            )
 
         # Complete the booking when every booked quantity has
         # been returned or recorded as missing.
@@ -688,3 +840,14 @@ class BookingReturnListCreateView(
                 "updated_at"
             ])
 
+            notify_users(
+                recipients,
+                title="Booking Completed",
+                message=(
+                    f"All equipment for booking "
+                    f"{booking.booking_number} has been accounted for."
+                ),
+                notification_type=Notification.NotificationType.BOOKING,
+                related_object_type="booking",
+                related_object_id=booking.id,
+            )
