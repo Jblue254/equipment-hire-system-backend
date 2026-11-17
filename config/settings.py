@@ -51,6 +51,7 @@ INSTALLED_APPS = [
     "sales",
     "transport",
     "notifications",
+    "dashboard",
 ]
 
 MIDDLEWARE = [
