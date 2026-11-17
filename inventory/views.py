@@ -28,9 +28,9 @@ from .serializers import (
     MaterialSerializer,
     StockMovementSerializer,
     EquipmentUnitSerializer,
+    MaintenanceRecordSerializer,
 )
 
-from .maintenance_serializers import MaintenanceRecordSerializer
 
 
 
