@@ -8,7 +8,9 @@ from .models import (
     Material,
     StockMovement,
     EquipmentUnit,
+    MaintenanceRecord,
 )
+
 
 
 class EquipmentCategorySerializer(serializers.ModelSerializer):
@@ -166,3 +168,82 @@ class EquipmentUnitSerializer(serializers.ModelSerializer):
             )
 
         return equipment
+
+
+
+
+
+class MaintenanceRecordSerializer(serializers.ModelSerializer):
+    equipment_name = serializers.CharField(
+        source="equipment.name",
+        read_only=True
+    )
+
+    unit_asset_number = serializers.CharField(
+        source="unit.asset_number",
+        read_only=True
+    )
+
+    recorded_by = serializers.StringRelatedField(
+        read_only=True
+    )
+
+    class Meta:
+        model = MaintenanceRecord
+        fields = "__all__"
+
+        read_only_fields = (
+            "id",
+            "date_reported",
+            "recorded_by",
+            "created_at",
+        )
+
+    def validate(self, attrs):
+        equipment = attrs.get(
+            "equipment",
+            getattr(self.instance, "equipment", None)
+        )
+
+        unit = attrs.get(
+            "unit",
+            getattr(self.instance, "unit", None)
+        )
+
+        quantity = attrs.get(
+            "quantity_affected",
+            getattr(self.instance, "quantity_affected", 1)
+        )
+
+        if equipment:
+            if unit and unit.equipment_id != equipment.id:
+                raise serializers.ValidationError({
+                    "unit": "Selected unit does not belong to this equipment."
+                })
+
+            if unit and quantity != 1:
+                raise serializers.ValidationError({
+                    "quantity_affected": "Individual units must have quantity 1."
+                })
+
+            if not unit and equipment.tracking_type == "INDIVIDUAL":
+                raise serializers.ValidationError({
+                    "unit": "Select a physical unit for individually tracked equipment."
+                })
+
+            if (
+                not unit
+                and equipment.tracking_type == "QUANTITY"
+                and quantity > equipment.total_quantity
+            ):
+                raise serializers.ValidationError({
+                    "quantity_affected": "Maintenance quantity exceeds total equipment stock."
+                })
+
+        if quantity < 1:
+            raise serializers.ValidationError({
+                "quantity_affected": "Quantity affected must be at least 1."
+            })
+
+        return attrs
+
