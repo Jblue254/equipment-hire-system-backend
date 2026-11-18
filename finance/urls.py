@@ -1,8 +1,10 @@
 from django.urls import path
 
 from .views import (
+    MpesaCallbackView,
     MpesaSTKPushView,
     PaymentListCreateView,
+    PaymentStatusView,
     PaymentVerificationView,
     BookingPaymentBalanceView,
     SalePaymentBalanceView,
@@ -35,5 +37,15 @@ path(
     "mpesa/stk-push/",
     MpesaSTKPushView.as_view(),
     name="mpesa-stk-push"
+),
+path(
+    "mpesa/callback/<str:callback_token>/",
+    MpesaCallbackView.as_view(),
+    name="mpesa-callback"
+),
+path(
+    "payments/<int:pk>/status/",
+    PaymentStatusView.as_view(),
+    name="payment-status"
 ),
 ]

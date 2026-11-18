@@ -1,4 +1,10 @@
 import os
+import logging
+import secrets
+
+from django.utils.decorators import method_decorator
+from django.views.decorators.csrf import csrf_exempt
+
 
 from rest_framework import status
 from rest_framework.permissions import AllowAny
@@ -24,7 +30,7 @@ from sales.models import Sale
 from .models import Payment
 from .serializers import PaymentSerializer
 
-
+logger = logging.getLogger(__name__)
 class BaseFinanceView:
     permission_classes = [
         IsAuthenticated,
@@ -470,9 +476,14 @@ class MpesaSTKPushView(
                 "updated_at",
             ])
 
-            raise ValidationError({
-                "mpesa": "Could not initiate M-Pesa payment. Please try again."
-            })
+            return Response(
+    {
+        "error": "Could not initiate M-Pesa payment.",
+        "payment_id": payment.id,
+        "status": payment.status,
+    },
+    status=status.HTTP_502_BAD_GATEWAY
+)
 
         return Response({
             "message": "STK Push sent. Ask the customer to check their phone.",
@@ -480,3 +491,173 @@ class MpesaSTKPushView(
             "checkout_request_id": checkout_id,
             "status": payment.status,
         }, status=status.HTTP_201_CREATED)
+
+@method_decorator(csrf_exempt, name="dispatch")
+class MpesaCallbackView(APIView):
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    def post(self, request, callback_token):
+
+        # Protect the public callback URL with a secret token.
+        expected_token = os.getenv("MPESA_CALLBACK_TOKEN", "")
+
+        if not expected_token or not secrets.compare_digest(
+            str(callback_token), expected_token
+        ):
+            return Response(
+                {"error": "Invalid callback token."},
+                status=403
+            )
+
+        callback = (
+            request.data.get("Body", {})
+            .get("stkCallback", {})
+        )
+
+        checkout_id = callback.get("CheckoutRequestID")
+        result_code = callback.get("ResultCode")
+        result_description = callback.get("ResultDesc", "")
+
+        if checkout_id is None or result_code is None:
+            return Response(
+                {"error": "Invalid Safaricom callback data."},
+                status=400
+            )
+
+        try:
+            with transaction.atomic():
+
+                payment = Payment.objects.select_for_update().get(
+                    mpesa_checkout_request_id=checkout_id
+                )
+
+                # Never process a completed payment twice.
+                if payment.status in [
+                    Payment.PaymentStatus.CONFIRMED,
+                    Payment.PaymentStatus.FAILED,
+                    Payment.PaymentStatus.REVERSED,
+                ]:
+                    return Response({
+                        "message": "Callback already processed."
+                    })
+
+                payment.mpesa_result_code = str(result_code)
+                payment.mpesa_result_description = str(
+                    result_description
+                )
+
+                if int(result_code) == 0:
+
+                    metadata = callback.get(
+                        "CallbackMetadata", {}
+                    ).get("Item", [])
+
+                    values = {
+                        item.get("Name"): item.get("Value")
+                        for item in metadata
+                    }
+
+                    receipt = values.get("MpesaReceiptNumber")
+                    callback_amount = values.get("Amount")
+                    callback_phone = values.get("PhoneNumber")
+
+                    if not receipt or callback_amount is None:
+                        logger.warning(
+                            "Incomplete successful M-Pesa callback: %s",
+                            checkout_id
+                        )
+                        return Response(
+                            {"error": "Incomplete payment confirmation."},
+                            status=400
+                        )
+
+                    if Decimal(str(callback_amount)) != payment.amount:
+                        logger.warning(
+                            "M-Pesa amount mismatch for payment %s",
+                            payment.pk
+                        )
+                        return Response(
+                            {"error": "Payment amount mismatch."},
+                            status=400
+                        )
+
+                    if callback_phone is not None:
+                        stored_phone = (
+                            payment.mpesa_phone_number
+                            .replace("+", "")
+                            .replace(" ", "")
+                            .replace("-", "")
+                        )
+
+                        if stored_phone.startswith("0"):
+                            stored_phone = "254" + stored_phone[1:]
+                        elif len(stored_phone) == 9:
+                            stored_phone = "254" + stored_phone
+
+                        if str(callback_phone) != stored_phone:
+                            return Response(
+                                {"error": "Payment phone number mismatch."},
+                                status=400
+                            )
+                    # Prevent one receipt from confirming two payments.
+                    if Payment.objects.filter(
+                        receipt_number=receipt
+                    ).exclude(pk=payment.pk).exists():
+                        logger.warning(
+                            "Duplicate M-Pesa receipt received: %s",
+                            receipt
+                        )
+                        return Response(
+                            {"error": "M-Pesa receipt already used."},
+                            status=400
+                        )
+
+                    now = timezone.now()
+
+                    payment.status = Payment.PaymentStatus.CONFIRMED
+                    payment.receipt_number = receipt
+                    payment.transaction_reference = receipt
+                    payment.paid_at = now
+                    payment.verified_at = now
+
+                else:
+                    payment.status = Payment.PaymentStatus.FAILED
+
+                payment.save()
+
+                return Response({
+                    "message": "Callback processed successfully.",
+                    "payment_id": payment.id,
+                    "payment_status": payment.status,
+                })
+
+        except Payment.DoesNotExist:
+            logger.warning(
+                "No payment found for M-Pesa checkout request: %s",
+                checkout_id
+            )
+            return Response(
+                {"error": "Payment request not found."},
+                status=404
+            )
+
+class PaymentStatusView(BaseFinanceView, APIView):
+
+    def get(self, request, pk):
+        payment = get_object_or_404(
+            Payment.objects.select_related("booking", "sale"),
+            pk=pk
+        )
+
+        return Response({
+            "payment_id": payment.id,
+            "amount": str(payment.amount),
+            "payment_method": payment.payment_method,
+            "status": payment.status,
+            "receipt_number": payment.receipt_number,
+            "transaction_reference": payment.transaction_reference,
+            "mpesa_result_description": payment.mpesa_result_description,
+            "paid_at": payment.paid_at,
+            "created_at": payment.created_at,
+        })
