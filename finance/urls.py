@@ -1,6 +1,7 @@
 from django.urls import path
 
 from .views import (
+    MpesaSTKPushView,
     PaymentListCreateView,
     PaymentVerificationView,
     BookingPaymentBalanceView,
@@ -29,5 +30,10 @@ urlpatterns = [
     "sales/<int:sale_id>/balance/",
     SalePaymentBalanceView.as_view(),
     name="sale-payment-balance"
+),
+path(
+    "mpesa/stk-push/",
+    MpesaSTKPushView.as_view(),
+    name="mpesa-stk-push"
 ),
 ]

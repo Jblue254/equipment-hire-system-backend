@@ -58,6 +58,34 @@ class Payment(models.Model):
         blank=True
     )
 
+    # Safaricom Daraja transaction details
+    mpesa_checkout_request_id = models.CharField(
+        max_length=100,
+        unique=True,
+        null=True,
+        blank=True
+    )
+
+    mpesa_merchant_request_id = models.CharField(
+        max_length=100,
+        null=True,
+        blank=True
+    )
+
+    mpesa_phone_number = models.CharField(
+        max_length=15,
+        blank=True
+    )
+
+    mpesa_result_code = models.CharField(
+        max_length=20,
+        blank=True
+    )
+
+    mpesa_result_description = models.TextField(
+        blank=True
+    )
+
     receipt_number = models.CharField(
         max_length=50,
         unique=True,

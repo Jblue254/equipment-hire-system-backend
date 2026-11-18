@@ -1,4 +1,10 @@
+import os
 
+from rest_framework import status
+from rest_framework.permissions import AllowAny
+from rest_framework.exceptions import ValidationError
+
+from .mpesa import initiate_stk_push
 from decimal import Decimal
 
 from django.db import transaction
@@ -318,3 +324,159 @@ class SalePaymentBalanceView(
             "credit_approved": credit_approved,
             "can_dispatch": can_dispatch,
         })
+
+class MpesaSTKPushView(
+    BaseFinanceView,
+    APIView
+):
+    @transaction.atomic
+    def post(self, request):
+        booking_id = request.data.get("booking")
+        sale_id = request.data.get("sale")
+        phone = request.data.get("phone_number")
+        amount_value = request.data.get("amount")
+
+        if bool(booking_id) == bool(sale_id):
+            raise ValidationError(
+                "Provide either a booking ID or a sale ID, not both."
+            )
+
+        if not phone or not amount_value:
+            raise ValidationError(
+                "Phone number and amount are required."
+            )
+
+        try:
+            amount = Decimal(str(amount_value))
+        except Exception:
+            raise ValidationError({"amount": "Enter a valid amount."})
+
+        if not amount.is_finite() or amount <= 0:
+            raise ValidationError({"amount": "Amount must be greater than zero."})
+
+        if amount != amount.quantize(Decimal("1")):
+            raise ValidationError({
+                "amount": "M-Pesa STK Push amounts must be whole shillings."
+            })
+
+        if booking_id:
+            booking = get_object_or_404(
+                Booking.objects.select_for_update(),
+                pk=booking_id
+            )
+
+            if booking.status in [
+                Booking.Status.REJECTED,
+                Booking.Status.CANCELLED,
+                Booking.Status.COMPLETED,
+            ]:
+                raise ValidationError(
+                    "Payments cannot be made for this booking."
+                )
+
+            confirmed, pending = get_payment_totals(
+                booking, "booking"
+            )
+
+            outstanding = booking.total_amount - confirmed - pending
+
+            if amount > outstanding:
+                raise ValidationError({
+                    "amount": f"Outstanding balance is {max(outstanding, Decimal('0.00'))}."
+                })
+
+            payment = Payment.objects.create(
+                booking=booking,
+                amount=amount,
+                payment_method=Payment.PaymentMethod.MPESA,
+                status=Payment.PaymentStatus.PENDING,
+                recorded_by=request.user,
+                mpesa_phone_number=str(phone),
+                notes="M-Pesa STK Push initiated."
+            )
+
+            account_reference = booking.booking_number
+
+        else:
+            sale = get_object_or_404(
+                Sale.objects.select_for_update(),
+                pk=sale_id
+            )
+
+            if sale.status in [
+                Sale.Status.CANCELLED,
+                Sale.Status.COMPLETED,
+            ]:
+                raise ValidationError(
+                    "Payments cannot be made for this sale."
+                )
+
+            confirmed, pending = get_payment_totals(
+                sale, "sale"
+            )
+
+            outstanding = sale.total_amount - confirmed - pending
+
+            if amount > outstanding:
+                raise ValidationError({
+                    "amount": f"Outstanding balance is {max(outstanding, Decimal('0.00'))}."
+                })
+
+            payment = Payment.objects.create(
+                sale=sale,
+                amount=amount,
+                payment_method=Payment.PaymentMethod.MPESA,
+                status=Payment.PaymentStatus.PENDING,
+                recorded_by=request.user,
+                mpesa_phone_number=str(phone),
+                notes="M-Pesa STK Push initiated."
+            )
+
+            account_reference = sale.sale_number
+
+        try:
+            response_data = initiate_stk_push(
+                phone_number=phone,
+                amount=amount,
+                account_reference=account_reference,
+                transaction_desc="System payment"
+            )
+
+            checkout_id = response_data.get("CheckoutRequestID")
+            merchant_id = response_data.get("MerchantRequestID")
+
+            if response_data.get("ResponseCode") != "0" or not checkout_id:
+                raise RuntimeError(
+                    response_data.get(
+                        "ResponseDescription",
+                        "STK Push request was not accepted."
+                    )
+                )
+
+            payment.mpesa_checkout_request_id = checkout_id
+            payment.mpesa_merchant_request_id = merchant_id
+            payment.save(update_fields=[
+                "mpesa_checkout_request_id",
+                "mpesa_merchant_request_id",
+                "updated_at",
+            ])
+
+        except Exception as error:
+            payment.status = Payment.PaymentStatus.FAILED
+            payment.mpesa_result_description = str(error)
+            payment.save(update_fields=[
+                "status",
+                "mpesa_result_description",
+                "updated_at",
+            ])
+
+            raise ValidationError({
+                "mpesa": "Could not initiate M-Pesa payment. Please try again."
+            })
+
+        return Response({
+            "message": "STK Push sent. Ask the customer to check their phone.",
+            "payment_id": payment.id,
+            "checkout_request_id": checkout_id,
+            "status": payment.status,
+        }, status=status.HTTP_201_CREATED)
