@@ -250,7 +250,7 @@ class SaleCancellationView(
         # Check for confirmed payments.
         confirmed_payments = Payment.objects.filter(
             sale=sale,
-            status=Payment.Status.CONFIRMED
+            status=Payment.PaymentStatus.CONFIRMED
         ).aggregate(
             total=Sum("amount")
         )["total"] or Decimal("0.00")
@@ -362,7 +362,7 @@ class SaleDispatchView(
 
             confirmed_payments = Payment.objects.filter(
                 sale=sale,
-                status=Payment.Status.CONFIRMED
+                status=Payment.PaymentStatus.CONFIRMED
             ).aggregate(
                 total=Sum("amount")
             )["total"] or Decimal("0.00")
