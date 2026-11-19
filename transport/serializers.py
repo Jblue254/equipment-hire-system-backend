@@ -108,7 +108,10 @@ class TripSerializer(serializers.ModelSerializer):
             "updated_at",
         )
 
+    
     def validate(self, attrs):
+        is_new = self.instance is None
+
         lorry = attrs.get(
             "lorry",
             getattr(self.instance, "lorry", None)
@@ -129,17 +132,20 @@ class TripSerializer(serializers.ModelSerializer):
             getattr(self.instance, "sale", None)
         )
 
+        lorry_changed = is_new or lorry != self.instance.lorry
+        driver_changed = is_new or driver != self.instance.driver
+
         if bool(booking) == bool(sale):
             raise serializers.ValidationError(
                 "A trip must belong to either a booking or a sale."
             )
 
-        if lorry and lorry.status != Lorry.Status.AVAILABLE:
+        if lorry_changed and lorry.status != Lorry.Status.AVAILABLE:
             raise serializers.ValidationError({
                 "lorry": "This lorry is not available."
             })
 
-        if driver and not driver.is_active:
+        if driver_changed and not driver.is_active:
             raise serializers.ValidationError({
                 "driver": "This driver is inactive."
             })
@@ -172,6 +178,7 @@ class TripSerializer(serializers.ModelSerializer):
             })
 
         return attrs
+
 
 
 class TripExpenseSerializer(serializers.ModelSerializer):

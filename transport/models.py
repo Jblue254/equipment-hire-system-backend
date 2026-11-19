@@ -71,6 +71,18 @@ class Driver(models.Model):
 
 class Trip(models.Model):
 
+    class Meta:
+    
+        constraints = [
+            models.CheckConstraint(
+                condition=(
+                    models.Q(booking__isnull=False, sale__isnull=True)
+                    | models.Q(booking__isnull=True, sale__isnull=False)
+                ),
+                name="trip_booking_or_sale_only",
+            )
+        ]
+
     class Status(models.TextChoices):
         PENDING = "PENDING", "Pending"
         ASSIGNED = "ASSIGNED", "Assigned"

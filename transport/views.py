@@ -258,11 +258,15 @@ class TripCompleteView(BaseTransportView, APIView):
             "status", "completed_at", "updated_at"
         ])
 
-        lorry.status = Lorry.Status.AVAILABLE
-        lorry.save(update_fields=[
-            "status", "updated_at"
-        ])
+        if lorry.status == Lorry.Status.ON_TRIP:
 
+            lorry.status = Lorry.Status.AVAILABLE
+            lorry.save(update_fields=[
+                "status", "updated_at"
+            ])
+
+
+        
         return Response(
             TripSerializer(trip).data,
             status=status.HTTP_200_OK
